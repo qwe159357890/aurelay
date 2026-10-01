@@ -175,7 +175,7 @@ fun SmartAdBanner(
             
             // tiny "Ad" badge overlay
             Text(
-                text = "Ad",
+                text = "广告",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                 fontSize = 9.sp,
