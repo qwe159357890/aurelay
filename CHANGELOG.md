@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.4.1] - 2026-10-01
+
+### Fixed
+- 地址上报在明文 HTTP（`http://`）服务器上必然失败：Android 9+ 默认禁止明文流量，
+  而应用清单未放行，上报会抛出 `IOException: Cleartext HTTP traffic ... not permitted`。
+  现已显式开启 `usesCleartextTraffic`。
+- 设置页「Last result」此前只显示异常类型（如 `异常: IOException`）无法定位；
+  现改为显示异常原因摘要，并在 Logcat（标签 `AurelayReport`）输出完整堆栈。
+
 ## [v1.4.0] - 2026-10-01
 
 ### Added
