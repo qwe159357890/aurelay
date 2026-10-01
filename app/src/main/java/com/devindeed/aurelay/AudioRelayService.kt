@@ -50,6 +50,9 @@ class AudioRelayService : Service() {
     private var currentSampleRate: Int = 0
     private var currentOutChannels: Int = 0
 
+    // 最近一次设置的音量：新建 AudioTrack 时恢复，避免重建后音量被重置为 1.0
+    @Volatile private var currentVolume: Float = 1.0f
+
     companion object {
         const val ACTION_SET_VOLUME = "com.devindeed.aurelay.SET_VOLUME"
         const val EXTRA_VOLUME = "volume"
@@ -445,8 +448,15 @@ class AudioRelayService : Service() {
             Log.e("AudioRelay", "客户端会话异常：${e.message}", e)
         } finally {
             try { decoder?.stop() } catch (e: Exception) { /* 忽略 */ }
-            audioTrack?.stop()
-            audioTrack?.flush()
+            // 只暂停并清空缓冲、不释放音轨：下一路客户端连接时 ensureAudioTrack()
+            // 会重新 play()。若这里写 stop()，音轨会停在 STOPPED 状态，
+            // 后续会话复用同一个音轨时就会「连着但没声音」。
+            try {
+                audioTrack?.pause()
+                audioTrack?.flush()
+            } catch (e: Exception) {
+                // 忽略暂停异常
+            }
             Log.i("AudioRelay", "Client disconnected.")
             // Clear client info and update notification
             lastClientName = ""
@@ -661,6 +671,19 @@ class AudioRelayService : Service() {
             currentOutChannels == outChannels &&
             existing.state == AudioTrack.STATE_INITIALIZED
         ) {
+            // 【关键修复】AudioTrack.stop() 不改变 state（仍是 STATE_INITIALIZED），
+            // 所以上一路客户端断开后再连进来，这里会拿到一个「已停止」的音轨：
+            // 数据照写但不会被播放 —— 表现就是手机端显示已连接、音量也能调，
+            // 却完全没有声音。复用前必须确认它真的在播放，否则先 flush() 再 play()。
+            if (existing.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                try {
+                    existing.flush()
+                    existing.play()
+                    Log.i("AudioRelay", "AudioTrack 已重新 play()：上一次会话残留为停止态")
+                } catch (e: Exception) {
+                    Log.e("AudioRelay", "AudioTrack 恢复播放失败：${e.message}", e)
+                }
+            }
             return existing
         }
         try {
@@ -711,6 +734,12 @@ class AudioRelayService : Service() {
             built.release()
             return null
         }
+        // 恢复用户之前设定过的音量（新建音轨默认 1.0，会把「已静音」状态丢掉）
+        try {
+            built.setVolume(currentVolume)
+        } catch (e: Exception) {
+            // 忽略音量恢复异常
+        }
         built.play()
         audioTrack = built
         currentSampleRate = sampleRate
@@ -723,6 +752,7 @@ class AudioRelayService : Service() {
         try {
             // Clamp volume between 0.0 and 1.0
             val clampedVolume = volume.coerceIn(0f, 1f)
+            currentVolume = clampedVolume
             audioTrack?.setVolume(clampedVolume)
             Log.d("AudioRelay", "AudioTrack volume updated to: $clampedVolume")
         } catch (e: Exception) {
