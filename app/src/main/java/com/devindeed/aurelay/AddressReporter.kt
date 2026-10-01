@@ -146,6 +146,7 @@ object AddressReporter {
             append("}")
         }
 
+        Log.i(TAG, "开始上报：$url")
         var connection: HttpURLConnection? = null
         try {
             val conn = URL(url).openConnection() as HttpURLConnection
@@ -176,8 +177,10 @@ object AddressReporter {
             saveResult(prefs, if (ok) "成功" else "HTTP $code")
             Log.i(TAG, "$summary 地址=$ipv4List $ipv6List")
         } catch (e: Exception) {
-            saveResult(prefs, "异常: ${e.javaClass.simpleName}")
-            Log.w(TAG, "上报失败：${e.message}")
+            // 结果里带上原因摘要（明文被拦、连接被拒、DNS 失败等），便于在设置页直接定位
+            val detail = e.message?.trim()?.take(60) ?: e.javaClass.simpleName
+            saveResult(prefs, "异常: $detail")
+            Log.w(TAG, "上报失败：${e.javaClass.simpleName} - ${e.message}", e)
         } finally {
             connection?.disconnect()
         }
