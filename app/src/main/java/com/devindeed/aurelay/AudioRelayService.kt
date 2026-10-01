@@ -52,6 +52,8 @@ class AudioRelayService : Service() {
     // 当前 AudioTrack 采用的采样率与声道数（流协商结果，用于判断是否需要重建）
     private var currentSampleRate: Int = 0
     private var currentOutChannels: Int = 0
+    // 当前音轨的缓冲区字节数（创建时确定，日志用）
+    private var currentBufferBytes: Int = 0
 
     // 最近一次设置的音量：新建 AudioTrack 时恢复，避免重建后音量被重置为 1.0
     @Volatile private var currentVolume: Float = 1.0f
@@ -849,6 +851,7 @@ class AudioRelayService : Service() {
         audioTrack = built
         currentSampleRate = sampleRate
         currentOutChannels = outChannels
+        currentBufferBytes = bufferSizeBytes
         Log.i("AudioRelay", "AudioTrack 已就绪：sampleRate=$sampleRate channels=$outChannels buffer=$bufferSizeBytes")
         DiagLog.i("音轨", "新建音轨成功：${trackSnapshot(built)}")
         return built
@@ -1007,7 +1010,7 @@ class AudioRelayService : Service() {
             val head = track.playbackHeadPosition
             "state=${stateName(track.state)} playState=${playStateName(track.playState)} " +
                     "采样率=${track.sampleRate} 声道=${track.channelCount} " +
-                    "缓冲=${track.bufferSizeInBytes}字节 音量=${track.volume} 欠载=$underruns 播放头=$head"
+                    "缓冲=${currentBufferBytes}字节 设定音量=$currentVolume 欠载=$underruns 播放头=$head"
         } catch (e: Exception) {
             "读取音轨状态失败：${e.message}"
         }

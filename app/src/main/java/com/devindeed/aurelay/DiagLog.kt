@@ -2,6 +2,7 @@ package com.devindeed.aurelay
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
 import android.util.Log
@@ -443,21 +444,20 @@ object DiagLog {
     }
 
     /**
-     * 把 AudioManager 设备类型翻译成中文名
+     * 把音频输出设备类型翻译成中文名
      *
      * :param type: AudioDeviceInfo.getType() 返回值
      * :return: 中文设备名
      */
     private fun outputTypeName(type: Int): String {
         return when (type) {
-            AudioManager.DEVICE_OUT_EARPIECE -> "听筒"
-            AudioManager.DEVICE_OUT_SPEAKER -> "扬声器"
-            AudioManager.DEVICE_OUT_WIRED_HEADSET -> "有线耳机"
-            AudioManager.DEVICE_OUT_WIRED_HEADPHONE -> "有线耳机(无麦)"
-            AudioManager.DEVICE_OUT_BLUETOOTH_A2DP -> "蓝牙A2DP"
-            AudioManager.DEVICE_OUT_BLUETOOTH_SCO -> "蓝牙SCO"
-            AudioManager.DEVICE_OUT_USB_HEADSET -> "USB耳机"
-            AudioManager.DEVICE_OUT_HEARING_AID -> "助听器"
+            AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "听筒"
+            AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "扬声器"
+            AudioDeviceInfo.TYPE_WIRED_HEADSET -> "有线耳机"
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "有线耳机(无麦)"
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "蓝牙A2DP"
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "蓝牙SCO"
+            AudioDeviceInfo.TYPE_HDMI -> "HDMI"
             else -> "其他($type)"
         }
     }
