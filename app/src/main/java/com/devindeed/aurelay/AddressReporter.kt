@@ -167,15 +167,23 @@ object AddressReporter {
                 writer.flush()
             }
 
-            val code = conn.responseCode
-            val ok = code in 200..299
-            val summary = if (ok) {
-                "上报成功 (HTTP $code) IPv4=${ipv4List.size} IPv6=${ipv6List.size}"
+            val httpCode = conn.responseCode
+            val bodyText = readResponseBody(conn)
+            // 中心服务器统一响应体：HTTP 状态恒为 200，业务结果在 body 的 code 字段（0 = 成功）。
+            // 只看 HTTP 状态码会把「令牌错误」误判为成功，因此必须同时看 code。
+            val bizCode = extractJsonInt(bodyText, "code")
+            val accepted = httpCode in 200..299 && (bizCode == null || bizCode == 0)
+            if (accepted) {
+                saveResult(prefs, "成功")
+                Log.i(
+                    TAG,
+                    "上报成功 (HTTP $httpCode) IPv4=${ipv4List.size} IPv6=${ipv6List.size} 地址=$ipv4List $ipv6List"
+                )
             } else {
-                "上报失败 HTTP $code"
+                val reason = extractJsonString(bodyText, "message") ?: "HTTP $httpCode"
+                saveResult(prefs, "失败: $reason")
+                Log.w(TAG, "上报被服务端拒绝：$reason（HTTP $httpCode，body=$bodyText）")
             }
-            saveResult(prefs, if (ok) "成功" else "HTTP $code")
-            Log.i(TAG, "$summary 地址=$ipv4List $ipv6List")
         } catch (e: Exception) {
             // 结果里带上原因摘要（明文被拦、连接被拒、DNS 失败等），便于在设置页直接定位
             val detail = e.message?.trim()?.take(60) ?: e.javaClass.simpleName
@@ -191,6 +199,66 @@ object AddressReporter {
         val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
             .format(java.util.Date())
         prefs.edit().putString(KEY_LAST_RESULT, "$result @ $time").apply()
+    }
+
+    // 读取响应体文本（读取失败返回空串，不影响结果判定）
+    private fun readResponseBody(conn: HttpURLConnection): String {
+        return try {
+            conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    // 取出 JSON 文本中的整型字段（轻量解析，与构造上报体一样不引入 JSON 依赖）
+    private fun extractJsonInt(json: String, key: String): Int? {
+        val marker = '"' + key + '"'
+        val at = json.indexOf(marker)
+        if (at < 0) return null
+        val colon = json.indexOf(':', at + marker.length)
+        if (colon < 0) return null
+        val digits = StringBuilder()
+        for (ch in json.substring(colon + 1)) {
+            if (ch == '-' && digits.isEmpty()) {
+                digits.append(ch)
+            } else if (ch.isDigit()) {
+                digits.append(ch)
+            } else if (digits.isNotEmpty()) {
+                break
+            }
+        }
+        return digits.toString().toIntOrNull()
+    }
+
+    // 取出 JSON 文本中的字符串字段（按 JSON 转义规则还原）
+    private fun extractJsonString(json: String, key: String): String? {
+        val marker = '"' + key + '"'
+        val at = json.indexOf(marker)
+        if (at < 0) return null
+        val colon = json.indexOf(':', at + marker.length)
+        if (colon < 0) return null
+        var index = json.indexOf('"', colon + 1)
+        if (index < 0) return null
+        index += 1
+        val text = StringBuilder()
+        while (index < json.length) {
+            val ch = json[index]
+            if (ch == '\\' && index + 1 < json.length) {
+                val next = json[index + 1]
+                when (next) {
+                    'n' -> text.append('\n')
+                    't' -> text.append('\t')
+                    'r' -> text.append('\r')
+                    else -> text.append(next)
+                }
+                index += 2
+                continue
+            }
+            if (ch == '"') break
+            text.append(ch)
+            index += 1
+        }
+        return text.toString()
     }
 
     // 采集本机所有可用的 IPv4 / IPv6 地址（已排除回环与链路本地地址）
