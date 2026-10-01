@@ -100,7 +100,7 @@ class MainActivity : ComponentActivity() {
                     
                     if (!connected) {
                         // Connection rejected - show toast
-                        Toast.makeText(ctx, "Connection rejected by receiver", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(ctx, "接收端拒绝了本次连接", Toast.LENGTH_SHORT).show()
                     }
                     
                     connectionState = connected
@@ -108,7 +108,7 @@ class MainActivity : ComponentActivity() {
                 }
                 ACTION_CONNECTION_REQUEST -> {
                     val ip = intent.getStringExtra("client_ip") ?: ""
-                    val name = intent.getStringExtra("client_name") ?: "Unknown Device"
+                    val name = intent.getStringExtra("client_name") ?: "未知设备"
                     Log.d("MainActivity", "Connection request from: $name ($ip)")
                     
                     ctx ?: return
@@ -237,7 +237,7 @@ class MainActivity : ComponentActivity() {
                                     pendingConnectionRequest?.let { (ip, _) ->
                                         sendConnectionResponse(ip, approved)
                                         if (!approved) {
-                                            Toast.makeText(this@MainActivity, "Connection rejected", Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(this@MainActivity, "连接被拒绝", Toast.LENGTH_SHORT).show()
                                         }
                                     }
                                     pendingConnectionRequest = null
@@ -351,7 +351,7 @@ class MainActivity : ComponentActivity() {
             val notificationManager = getSystemService(NotificationManager::class.java)
             val channel = NotificationChannel(
                 "audioRelayChannel",
-                "Audio Relay Playback",
+                "音频中继播放",
                 NotificationManager.IMPORTANCE_LOW
             )
             notificationManager.createNotificationChannel(channel)
@@ -371,7 +371,7 @@ fun getDeviceName(): String {
         
         // Fallback: Use MANUFACTURER + MODEL or just MODEL
         val manufacturer = Build.MANUFACTURER?.replaceFirstChar { it.uppercase() } ?: ""
-        val model = Build.MODEL ?: "Android Device"
+        val model = Build.MODEL ?: "Android 设备"
         
         when {
             // If model already contains manufacturer name, just use model
@@ -381,7 +381,7 @@ fun getDeviceName(): String {
             else -> model
         }
     } catch (e: Exception) {
-        "Android Device"
+        "Android 设备"
     }
 }
 
@@ -395,14 +395,14 @@ fun getDeviceIpAddress(context: Context): String {
             while (addresses.hasMoreElements()) {
                 val address = addresses.nextElement()
                 if (!address.isLoopbackAddress && address is Inet4Address) {
-                    return address.hostAddress ?: "Unknown"
+                    return address.hostAddress ?: "未知"
                 }
             }
         }
     } catch (e: Exception) {
         e.printStackTrace()
     }
-    return "Unknown"
+    return "未知"
 }
 
 // Paired device data class
@@ -531,7 +531,7 @@ fun AurelayApp(
             if (result.resultCode == android.app.Activity.RESULT_OK) {
                 // Check if a receiver is selected
                 if (clientIp.isEmpty()) {
-                    Toast.makeText(context, "Please select a receiver device first", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "请先选择一台接收端设备", Toast.LENGTH_LONG).show()
                     return@rememberLauncherForActivityResult
                 }
                 
@@ -574,7 +574,7 @@ fun AurelayApp(
                     }
                 }
             } else {
-                 Toast.makeText(context, "Audio recording permission is required to broadcast audio.", Toast.LENGTH_LONG).show()
+                 Toast.makeText(context, "广播音频需要录音权限。", Toast.LENGTH_LONG).show()
             }
         }
     } else null
@@ -595,7 +595,7 @@ fun AurelayApp(
                     IconButton(onClick = { showAboutDialog = true }) {
                         Icon(
                             imageVector = Icons.Rounded.Info,
-                            contentDescription = "About",
+                            contentDescription = "关于",
                             tint = MaterialTheme.colorScheme.onBackground
                         )
                     }
@@ -623,7 +623,7 @@ fun AurelayApp(
                 modifier = Modifier.padding(bottom = 16.dp)
             ) {
                 Text(
-                    text = "Receiver",
+                    text = "接收端",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = if (!isBroadcastMode) FontWeight.Bold else FontWeight.Normal,
                     color = if (!isBroadcastMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
@@ -633,7 +633,7 @@ fun AurelayApp(
                     onCheckedChange = {
                         if (it) { // Trying to switch to Broadcast (Sender) Mode
                             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                                Toast.makeText(context, "Audio Capture requires Android 10+", Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, "音频采集需要 Android 10 及以上", Toast.LENGTH_LONG).show()
                                 isBroadcastMode = false // Prevent switch
                             } else {
                                 isBroadcastMode = true
@@ -658,7 +658,7 @@ fun AurelayApp(
                     modifier = Modifier.padding(horizontal = 8.dp)
                 )
                 Text(
-                    text = "Sender",
+                    text = "发送端",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = if (isBroadcastMode) FontWeight.Bold else FontWeight.Normal,
                     color = if (isBroadcastMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
@@ -692,7 +692,7 @@ fun AurelayApp(
                                      else if (!isClientConnected) Icons.Rounded.LinkOff
                                      else if (isMuted) Icons.Rounded.HeadsetOff 
                                      else Icons.Rounded.Headphones,
-                        contentDescription = if (isMuted) "Unmute" else "Mute",
+                        contentDescription = if (isMuted) "取消静音" else "静音",
                         modifier = Modifier.size(56.dp),
                         tint = statusColor
                     )
@@ -700,11 +700,11 @@ fun AurelayApp(
                 Spacer(modifier = Modifier.height(20.dp))
 
                 val statusText = if (isBroadcastMode) {
-                    if (isServiceRunning) "Broadcasting Audio" else "Ready to Broadcast"
+                    if (isServiceRunning) "正在广播音频" else "可以开始广播"
                 } else {
                     if (isClientConnected) {
-                         if (isMuted) "Muted" else "Streaming Audio"
-                    } else if (isServiceRunning) "Waiting for Connection" else "Service Stopped"
+                         if (isMuted) "已静音" else "正在接收播放"
+                    } else if (isServiceRunning) "等待连接" else "服务未启动"
                 }
                 Spacer(modifier = Modifier.height(10.dp))
 
@@ -717,9 +717,9 @@ fun AurelayApp(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = if (isBroadcastMode) {
-                         if (isServiceRunning) "Listening on port $port" else "Click Start to stream"
+                         if (isServiceRunning) "正在监听端口 $port" else "点击「开始」以推送音频"
                     } else {
-                         if (isClientConnected) "Connected: $clientIp:$port" else "Press Start to begin listening"
+                         if (isClientConnected) "已连接：$clientIp:$port" else "点击「开始」以等待连接"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -745,7 +745,7 @@ fun AurelayApp(
                         // Volume Slider - conditionally shown
                         if (showVolumeSlider) {
                             Text(
-                                "Local Volume",
+                                "本机音量",
                                 style = MaterialTheme.typography.labelLarge,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -794,7 +794,7 @@ fun AurelayApp(
                             ) {
                                 if (!isBroadcastMode) {
                                     Text(
-                                        "Connection Details",
+                                        "连接信息",
                                         style = MaterialTheme.typography.titleMedium,
                                         fontWeight = FontWeight.SemiBold,
                                         color = MaterialTheme.colorScheme.onSurface
@@ -810,7 +810,7 @@ fun AurelayApp(
                                     Spacer(Modifier.height(20.dp))
 
                                     Text(
-                                        "Device IP Address",
+                                        "设备 IP 地址",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         letterSpacing = 0.5.sp
@@ -826,7 +826,7 @@ fun AurelayApp(
                                     Spacer(Modifier.height(20.dp))
 
                                     Text(
-                                        "Port",
+                                        "端口",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         letterSpacing = 0.5.sp
@@ -842,14 +842,14 @@ fun AurelayApp(
                                     Spacer(Modifier.height(20.dp))
 
                                     Text(
-                                        "Local IPv6 (for remote use)",
+                                        "本机 IPv6（公网连接用）",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         letterSpacing = 0.5.sp
                                     )
                                     Spacer(Modifier.height(6.dp))
                                     Text(
-                                        localAddresses.second.firstOrNull() ?: "No IPv6 available",
+                                        localAddresses.second.firstOrNull() ?: "暂无可用 IPv6",
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontWeight = FontWeight.Medium,
                                         color = MaterialTheme.colorScheme.onSurface
@@ -865,7 +865,7 @@ fun AurelayApp(
                                     Spacer(Modifier.height(14.dp))
 
                                     Text(
-                                        if (isBroadcastMode) "Connect from another device to hear audio" else "Use these details to connect",
+                                        if (isBroadcastMode) "在另一台设备上连接即可听到声音" else "使用以下信息进行连接",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.padding(horizontal = 12.dp),
@@ -932,7 +932,7 @@ fun AurelayApp(
                                     // Paired Devices Section - Redesigned
                                     if (pairedDevices.isNotEmpty()) {
                                         Text(
-                                            "Paired Devices",
+                                            "已配对设备",
                                             style = MaterialTheme.typography.titleMedium,
                                             fontWeight = FontWeight.Bold,
                                             color = MaterialTheme.colorScheme.primary
@@ -1011,7 +1011,7 @@ fun AurelayApp(
                                                                 modifier = Modifier.size(16.dp)
                                                             )
                                                             Spacer(Modifier.width(4.dp))
-                                                            Text("Stop")
+                                                            Text("停止")
                                                         }
                                                     } else if (isConnectingToThis) {
                                                         FilledTonalButton(
@@ -1023,7 +1023,7 @@ fun AurelayApp(
                                                                 strokeWidth = 2.dp
                                                             )
                                                             Spacer(Modifier.width(6.dp))
-                                                            Text("Connecting")
+                                                            Text("连接中")
                                                         }
                                                     } else {
                                                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1036,7 +1036,7 @@ fun AurelayApp(
                                                             ) {
                                                                 Icon(
                                                                     imageVector = Icons.Rounded.LinkOff,
-                                                                    contentDescription = "Unpair",
+                                                                    contentDescription = "解除配对",
                                                                     tint = MaterialTheme.colorScheme.error,
                                                                     modifier = Modifier.size(20.dp)
                                                                 )
@@ -1047,7 +1047,7 @@ fun AurelayApp(
                                                                     onClientIpSelected(device.ip)
                                                                 }
                                                             ) {
-                                                                Text("Connect")
+                                                                Text("连接")
                                                             }
                                                         }
                                                     }
@@ -1059,7 +1059,7 @@ fun AurelayApp(
                                     }
 
                                     Text(
-                                        "Nearby Devices",
+                                        "附近设备",
                                         style = MaterialTheme.typography.titleMedium,
                                         fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.onSurface
@@ -1078,7 +1078,7 @@ fun AurelayApp(
                                                 CircularProgressIndicator(modifier = Modifier.size(32.dp))
                                                 Spacer(Modifier.height(12.dp))
                                                 Text(
-                                                    "Searching...",
+                                                    "搜索中…",
                                                     style = MaterialTheme.typography.bodyMedium,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
@@ -1105,7 +1105,7 @@ fun AurelayApp(
                                                     )
                                                     Spacer(Modifier.height(8.dp))
                                                     Text(
-                                                        "No devices found",
+                                                        "未发现设备",
                                                         style = MaterialTheme.typography.bodyMedium,
                                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                                     )
@@ -1119,7 +1119,7 @@ fun AurelayApp(
                                                             modifier = Modifier.size(18.dp)
                                                         )
                                                         Spacer(Modifier.width(6.dp))
-                                                        Text("Refresh")
+                                                        Text("刷新")
                                                     }
                                                 }
                                             }
@@ -1199,7 +1199,7 @@ fun AurelayApp(
                                                                     modifier = Modifier.size(16.dp)
                                                                 )
                                                                 Spacer(Modifier.width(4.dp))
-                                                                Text("Stop")
+                                                                Text("停止")
                                                             }
                                                         } else if (isConnectingToThis) {
                                                             FilledTonalButton(
@@ -1211,7 +1211,7 @@ fun AurelayApp(
                                                                     strokeWidth = 2.dp
                                                                 )
                                                                 Spacer(Modifier.width(6.dp))
-                                                                Text("Connecting")
+                                                                Text("连接中")
                                                             }
                                                         } else {
                                                             FilledTonalButton(
@@ -1220,7 +1220,7 @@ fun AurelayApp(
                                                                     onClientIpSelected(ip)
                                                                 }
                                                             ) {
-                                                                Text("Connect")
+                                                                Text("连接")
                                                             }
                                                         }
                                                     }
@@ -1236,7 +1236,7 @@ fun AurelayApp(
 
                         if (isServiceRunning) {
                             Text(
-                                if (isBroadcastMode) "Broadcasting..." else "Listening for incoming connections...",
+                                if (isBroadcastMode) "正在广播…" else "正在等待连接…",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.secondary
                             )
@@ -1268,13 +1268,13 @@ fun AurelayApp(
                         if (isBroadcastMode) {
                             // Check if receiver is selected first
                             if (clientIp.isEmpty()) {
-                                Toast.makeText(context, "Please select a receiver device first", Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, "请先选择一台接收端设备", Toast.LENGTH_LONG).show()
                                 return@Button
                             }
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                                 recordAudioPermissionLauncher?.launch(android.Manifest.permission.RECORD_AUDIO)
                             } else {
-                                Toast.makeText(context, "Audio Capture requires Android 10+", Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, "音频采集需要 Android 10 及以上", Toast.LENGTH_LONG).show()
                             }
                         } else {
                             isServiceRunning = true
@@ -1308,7 +1308,7 @@ fun AurelayApp(
                 )
                 Spacer(Modifier.width(12.dp))
                 Text(
-                    text = if (isServiceRunning) "Stop" else "Start",
+                    text = if (isServiceRunning) "停止" else "开始",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -1332,7 +1332,7 @@ fun AurelayApp(
             },
             title = {
                 Text(
-                    "Incoming Connection",
+                    "连接请求",
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold
                 )
@@ -1343,20 +1343,20 @@ fun AurelayApp(
                     modifier = Modifier.padding(vertical = 8.dp)
                 ) {
                     Text(
-                        text = "$name wants to connect to your device.",
+                        text = "$name 请求连接到你的设备。",
                         style = MaterialTheme.typography.bodyLarge,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
                     Spacer(Modifier.height(12.dp))
                     Text(
-                        text = "IP: $ip",
+                        text = "IP：$ip",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontWeight = FontWeight.Medium
                     )
                     Spacer(Modifier.height(16.dp))
                     Text(
-                        text = "Do you want to allow this connection?",
+                        text = "是否允许该连接？",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1377,7 +1377,7 @@ fun AurelayApp(
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            text = "Remember this device",
+                            text = "记住此设备",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -1390,19 +1390,19 @@ fun AurelayApp(
                         onConnectionResponse(true)
                         if (rememberDevice) {
                             savePairedDevice(context, PairedDevice(name, ip, 5000))
-                            Toast.makeText(context, "Device saved to paired devices", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "设备已保存到已配对列表", Toast.LENGTH_SHORT).show()
                         }
                     },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary
                     )
                 ) {
-                    Text(text = "Accept")
+                    Text(text = "允许")
                 }
             },
             dismissButton = {
                 OutlinedButton(onClick = { onConnectionResponse(false) }) {
-                    Text(text = "Reject")
+                    Text(text = "拒绝")
                 }
             },
             containerColor = MaterialTheme.colorScheme.surface,
@@ -1421,7 +1421,7 @@ fun AurelayApp(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "About Aurelay",
+                        text = "关于 Aurelay",
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold
                     )
@@ -1434,7 +1434,7 @@ fun AurelayApp(
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Settings,
-                            contentDescription = "Settings",
+                            contentDescription = "设置",
                             tint = MaterialTheme.colorScheme.primary
                         )
                     }
@@ -1446,7 +1446,7 @@ fun AurelayApp(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text(
-                        text = "Version ${BuildConfig.VERSION_NAME}",
+                        text = "版本 ${BuildConfig.VERSION_NAME}",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.primary
@@ -1455,14 +1455,14 @@ fun AurelayApp(
                     Spacer(Modifier.height(4.dp))
                     
                     Text(
-                        text = "Stream audio wirelessly between Android devices and desktop over your local network.",
+                        text = "把系统声音无线推送到 Android 设备，支持局域网与公网。",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     
                     Spacer(Modifier.height(4.dp))
                     
                     Text(
-                        text = "Developer",
+                        text = "开发者",
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.primary
@@ -1475,7 +1475,7 @@ fun AurelayApp(
                     Spacer(Modifier.height(4.dp))
                     
                     Text(
-                        text = "© 2025 Aurelay Audio Relay. Open Source Project.",
+                        text = "© 2025 Aurelay 音频中继 · 开源项目",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1483,7 +1483,7 @@ fun AurelayApp(
             },
             confirmButton = {
                 TextButton(onClick = { showAboutDialog = false }) {
-                    Text("Close")
+                    Text("关闭")
                 }
             },
             containerColor = MaterialTheme.colorScheme.surface,
@@ -1513,7 +1513,7 @@ fun AurelayApp(
             onDismissRequest = { showSettingsDialog = false },
             title = {
                 Text(
-                    text = "Settings",
+                    text = "设置",
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold
                 )
@@ -1534,12 +1534,12 @@ fun AurelayApp(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Auto-start Service",
+                                text = "自动启动服务",
                                 style = MaterialTheme.typography.bodyLarge,
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
-                                text = "Start service automatically on app launch",
+                                text = "打开 App 时自动启动服务",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1560,12 +1560,12 @@ fun AurelayApp(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Require Connection Confirmation",
+                                text = "连接需要确认",
                                 style = MaterialTheme.typography.bodyLarge,
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
-                                text = "Ask before accepting incoming connections",
+                                text = "接受连接前先询问我",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1581,12 +1581,12 @@ fun AurelayApp(
                     // Theme mode setting
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Text(
-                            text = "App Theme",
+                            text = "应用主题",
                             style = MaterialTheme.typography.bodyLarge,
                             fontWeight = FontWeight.Medium
                         )
                         Text(
-                            text = "Choose your preferred theme",
+                            text = "选择你偏好的主题",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -1598,19 +1598,19 @@ fun AurelayApp(
                             FilterChip(
                                 selected = tempThemeMode == "system",
                                 onClick = { tempThemeMode = "system" },
-                                label = { Text("System") },
+                                label = { Text("跟随系统") },
                                 modifier = Modifier.weight(1f)
                             )
                             FilterChip(
                                 selected = tempThemeMode == "light",
                                 onClick = { tempThemeMode = "light" },
-                                label = { Text("Light") },
+                                label = { Text("浅色") },
                                 modifier = Modifier.weight(1f)
                             )
                             FilterChip(
                                 selected = tempThemeMode == "dark",
                                 onClick = { tempThemeMode = "dark" },
-                                label = { Text("Dark") },
+                                label = { Text("深色") },
                                 modifier = Modifier.weight(1f)
                             )
                         }
@@ -1621,20 +1621,20 @@ fun AurelayApp(
                     // Audio Output setting (Sender Mode Only)
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Text(
-                            text = "Audio Output (Sender)",
+                            text = "音频输出（发送端）",
                             style = MaterialTheme.typography.bodyLarge,
                             fontWeight = FontWeight.Medium
                         )
                         Text(
                             text = if (isBroadcastMode) {
                                 when (tempAudioOutputMode) {
-                                    "this_device" -> "This device only"
-                                    "remote_only" -> "Remote device only"
-                                    "both_devices" -> "Both devices"
-                                    else -> "Select output device"
+                                    "this_device" -> "仅本机播放"
+                                    "remote_only" -> "仅远端播放"
+                                    "both_devices" -> "两台设备都播"
+                                    else -> "选择输出设备"
                                 }
                             } else {
-                                "Available in Sender mode"
+                                "仅在发送端模式下可用"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = if (isBroadcastMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
@@ -1647,21 +1647,21 @@ fun AurelayApp(
                             FilterChip(
                                 selected = tempAudioOutputMode == "this_device",
                                 onClick = { if (isBroadcastMode) tempAudioOutputMode = "this_device" },
-                                label = { Text("This Device", style = MaterialTheme.typography.labelMedium) },
+                                label = { Text("本机", style = MaterialTheme.typography.labelMedium) },
                                 enabled = isBroadcastMode,
                                 modifier = Modifier.weight(1f)
                             )
                             FilterChip(
                                 selected = tempAudioOutputMode == "remote_only",
                                 onClick = { if (isBroadcastMode) tempAudioOutputMode = "remote_only" },
-                                label = { Text("Remote", style = MaterialTheme.typography.labelMedium) },
+                                label = { Text("远端", style = MaterialTheme.typography.labelMedium) },
                                 enabled = isBroadcastMode,
                                 modifier = Modifier.weight(1f)
                             )
                             FilterChip(
                                 selected = tempAudioOutputMode == "both_devices",
                                 onClick = { if (isBroadcastMode) tempAudioOutputMode = "both_devices" },
-                                label = { Text("Both", style = MaterialTheme.typography.labelMedium) },
+                                label = { Text("两者", style = MaterialTheme.typography.labelMedium) },
                                 enabled = isBroadcastMode,
                                 modifier = Modifier.weight(1f)
                             )
@@ -1679,12 +1679,12 @@ fun AurelayApp(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Dynamic Colors",
+                                    text = "动态取色",
                                     style = MaterialTheme.typography.bodyLarge,
                                     fontWeight = FontWeight.Medium
                                 )
                                 Text(
-                                    text = "Use colors from your wallpaper",
+                                    text = "从壁纸提取配色",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -1706,12 +1706,12 @@ fun AurelayApp(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Show Volume Slider",
+                                text = "显示音量滑块",
                                 style = MaterialTheme.typography.bodyLarge,
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
-                                text = "Display volume control slider",
+                                text = "显示音量控制滑块",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1732,12 +1732,12 @@ fun AurelayApp(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Show Audio Visualizer",
+                                text = "显示音频可视化",
                                 style = MaterialTheme.typography.bodyLarge,
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
-                                text = "Display real-time audio waveform",
+                                text = "显示实时音频波形",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1759,12 +1759,12 @@ fun AurelayApp(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Public Address Reporting",
+                                    text = "公网地址上报",
                                     style = MaterialTheme.typography.bodyLarge,
                                     fontWeight = FontWeight.Medium
                                 )
                                 Text(
-                                    text = "Report this device's public IPv4/IPv6 to your server so the desktop sender can reach it over the internet",
+                                    text = "把本机公网 IPv4/IPv6 上报到你的服务器，让电脑端能在公网上找到手机并连接",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -1780,7 +1780,7 @@ fun AurelayApp(
                         OutlinedTextField(
                             value = tempReportUrl,
                             onValueChange = { tempReportUrl = it },
-                            label = { Text("Report endpoint URL") },
+                            label = { Text("上报接口地址") },
                             placeholder = { Text("http://your-server:8001/api/aurelay/report") },
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
@@ -1792,7 +1792,7 @@ fun AurelayApp(
                         OutlinedTextField(
                             value = tempReportToken,
                             onValueChange = { tempReportToken = it },
-                            label = { Text("Report token") },
+                            label = { Text("上报令牌") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -1800,7 +1800,7 @@ fun AurelayApp(
                         Spacer(Modifier.height(8.dp))
 
                         Text(
-                            text = "Last result: " + (prefs.getString(AddressReporter.KEY_LAST_RESULT, "never") ?: "never"),
+                            text = "最近上报结果：" + (prefs.getString(AddressReporter.KEY_LAST_RESULT, "尚未上报") ?: "尚未上报"),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -1831,9 +1831,9 @@ fun AurelayApp(
                             if (tempReportEnabled && tempReportUrl.trim().isNotEmpty()) {
                                 AddressReporter.start(context)
                                 AddressReporter.reportNow(context)
-                                Toast.makeText(context, "Address reporting enabled", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "已开启公网地址上报", Toast.LENGTH_SHORT).show()
                             } else {
-                                Toast.makeText(context, "Address reporting disabled", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "已关闭公网地址上报", Toast.LENGTH_SHORT).show()
                             }
                         } catch (e: Exception) {
                             Log.e("AurelayReport", "更新上报配置失败：${e.message}")
@@ -1852,16 +1852,16 @@ fun AurelayApp(
                             context.startService(stopIntent)
                             isServiceRunning = false
                             
-                            Toast.makeText(context, "Audio output changed. Please restart streaming to apply.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "音频输出已修改，请重启推流以生效。", Toast.LENGTH_SHORT).show()
                         }
                     }
                 ) {
-                    Text("Save")
+                    Text("保存")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showSettingsDialog = false }) {
-                    Text("Cancel")
+                    Text("取消")
                 }
             }
         )
