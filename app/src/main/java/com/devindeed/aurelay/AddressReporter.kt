@@ -198,7 +198,7 @@ object AddressReporter {
     private fun saveResult(prefs: SharedPreferences, result: String) {
         val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
             .format(java.util.Date())
-        prefs.edit().putString(KEY_LAST_RESULT, "$result @ $time").apply()
+        prefs.edit().putString(KEY_LAST_RESULT, "$result（$time）").apply()
     }
 
     // 读取响应体文本（读取失败返回空串，不影响结果判定）
