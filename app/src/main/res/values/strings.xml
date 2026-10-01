@@ -1,12 +1,12 @@
 <resources>
-    <string name="app_name">Aurelay</string>
-    <string name="listening_for_audio">Listening for Audio...</string>
+    <string name="app_name">Aurelay 声音中继</string>
+    <string name="listening_for_audio">正在等待音频…</string>
     <!-- IAP / Ads placeholders (test IDs) -->
     <!-- Test App ID recommended by Google for local/dev: ca-app-pub-3940256099942544~3347511713 -->
     <string name="admob_app_id">ca-app-pub-6593809337731836~1736221017</string>
     <!-- Adaptive Banner test unit ID (official Google test ID): ca-app-pub-3940256099942544/9214589741-->
     <string name="admob_banner_id">ca-app-pub-6593809337731836/9021467054</string>
-    <string name="iap_buy_remove_ads">Remove Ads</string>
-    <string name="iap_purchase_success">Purchase successful — thank you!</string>
-    <string name="iap_ads_title">IAP &amp; Ads</string>
+    <string name="iap_buy_remove_ads">移除广告</string>
+    <string name="iap_purchase_success">购买成功，感谢支持！</string>
+    <string name="iap_ads_title">内购与广告</string>
 </resources>
