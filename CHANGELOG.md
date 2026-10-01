@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.4.5] - 2026-10-01
+
+### Fixed
+- **修复手机端 Opus 解码永久不出声（根因）**：Android 10 起系统 Opus 解码器为
+  `c2.android.opus.decoder`（AOSP `C2SoftOpusDec`），它把**第一个输入缓冲**同时当作
+  OpusHead、codec delay、seek pre-roll 三样初始化数据来解析，并用内部计数
+  `mInputBufferCount` 判定「三样都齐了（=3）才真正配置解码器开始解码」。
+  此前只往 `csd-0` 放了 19 字节裸 OpusHead（旧式写法），另两项取不到，计数只加到 1，
+  于是解码器始终不产出数据；更严重的是**紧接着到达的前两个真实 Opus 包被当成
+  codec delay / pre-roll 解析**——把 Opus 包头 8 字节直接读成 int64 纳秒数，
+  换算后高达 1e14 量级（约几十天），写入 `mSamplesToDiscard` 后
+  **此后每一帧解码结果都被整体丢弃**，表现为「收包几百个、写入音轨 0 块、无任何报错」。
+  现按 AOSP `OpusHeader.cpp` 的 `WriteOpusHeaders()` 构造「统一 CSD」（83 字节）整体放进
+  `csd-0`：`"AOPUSHDR"+u64LE(19)+OpusHead`、`"AOPUSDLY"+u64LE(8)+延迟纳秒`、
+  `"AOPUSPRL"+u64LE(8)+预滚纳秒`，一次给齐三项，计数直接到 3，第一帧即可正常解码。
+- 移除 `KEY_MAX_INPUT_SIZE`（AOSP 该参数是 const 值 5760，由调用方另行指定存在冲突风险）。
+- 取输出缓冲的超时由 0 改为 2ms，避免软件解码器上频繁取不到已解出的数据。
+- 解码异常改为按 `MediaCodec.CodecException` 单独捕获并记录
+  `errorCode / isTransient / isRecoverable`，不再被静默吞掉。
+
+### Changed
+- 诊断日志新增：统一 CSD 的十六进制内容、解码输出格式（含 PCM 编码位深）、
+  `dequeueOutputBuffer` 的未知负返回值；「无解码输出」告警补充成因提示。
+
 ## [v1.4.4] - 2026-10-01
 
 ### Added
