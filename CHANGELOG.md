@@ -29,6 +29,13 @@ and this project adheres to Semantic Versioning (https://semver.org/).
 - 诊断日志新增：统一 CSD 的十六进制内容、解码输出格式（含 PCM 编码位深）、
   `dequeueOutputBuffer` 的未知负返回值；「无解码输出」告警补充成因提示。
 
+### Verified
+
+- **[阶段性里程碑] WiFi 局域网实测通过**：在 OnePlus LE2120 上以 WiFi 连接电脑端，
+  手机端**可正常连接并正常播放声音**。这确认 v1.4.5 的 Opus 统一 CSD 修复有效——
+  长期存在的「连上了但完全没声音（Opus 解码永久静音）」核心故障已解除。
+  本版本（v1.4.5 / versionCode 12）作为后续问题排查的**可用基线**保留。
+
 ## [v1.4.4] - 2026-10-01
 
 ### Added
