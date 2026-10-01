@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.4.2] - 2026-10-01
+
+### Fixed
+- 地址上报结果误判：中心服务器所有端点都返回「HTTP 200 + body 内 `code`」，
+  而上报器只判断 HTTP 状态码，导致**令牌错误时界面仍显示「成功」**，实际并未注册。
+  现在同时解析响应体的 `code`，非 0 即按失败处理，并把服务器返回的中文 message
+  直接显示在「Last result」中。
+
 ## [v1.4.1] - 2026-10-01
 
 ### Fixed
