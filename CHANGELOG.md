@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.4.3] - 2026-10-01
+
+### Fixed
+- **重连后完全没有声音**：`ensureAudioTrack()` 复用已有 `AudioTrack` 时只校验
+  `state == STATE_INITIALIZED`，而 `AudioTrack.stop()` 并不会改变 `state`
+  （只把 `playState` 置为 `STOPPED`）。于是上一路客户端断开后再连进来，
+  复用到的是「已停止」的音轨 —— 数据照写但不被播放。表现：手机端显示已连接、
+  音量也能调，但一点声音都没有。现在复用前会确认 `playState`，
+  非播放态则先 `flush()` 再 `play()`；会话结束也改为 `pause()` 而非 `stop()`。
+- 新建 `AudioTrack` 时恢复用户设定过的音量（原先重建后会重置为 1.0）。
+
+### Changed
+- 界面与通知文案全部改为中文。
+
 ## [v1.4.2] - 2026-10-01
 
 ### Fixed
