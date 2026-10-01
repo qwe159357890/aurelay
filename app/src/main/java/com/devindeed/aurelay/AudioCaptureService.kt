@@ -388,7 +388,7 @@ class AudioCaptureService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Audio Capture Service",
+                "音频采集服务",
                 NotificationManager.IMPORTANCE_LOW
             )
             val manager = getSystemService(NotificationManager::class.java)
@@ -398,8 +398,8 @@ class AudioCaptureService : Service() {
 
     private fun createNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Aurynk Audio Capture")
-            .setContentText("Capturing and streaming system audio...")
+            .setContentTitle("音频采集")
+            .setContentText("正在采集并推送系统音频…")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
