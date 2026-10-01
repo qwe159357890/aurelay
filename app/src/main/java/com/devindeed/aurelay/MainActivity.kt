@@ -53,6 +53,8 @@ import androidx.core.view.WindowInsetsControllerCompat
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.IntentFilter
 import android.content.Intent as AndroidIntent
 import android.content.Context
@@ -144,7 +146,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        
+
+        // 安装诊断日志器（越早越好，后续所有日志才有落点）
+        DiagLog.install(this)
+
         // Ensure the notification channel exists
         createNotificationChannel()
         
@@ -516,6 +521,12 @@ fun AurelayApp(
     var isMuted by remember { mutableStateOf(false) }
     var showAboutDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showDiagLogDialog by remember { mutableStateOf(false) }
+    // 诊断日志：开关状态、日志文本、上传/分享的进行状态与结果提示
+    var diagEnabled by remember { mutableStateOf(DiagLog.isEnabled()) }
+    var diagText by remember { mutableStateOf("") }
+    var diagResult by remember { mutableStateOf("") }
+    var diagBusy by remember { mutableStateOf(false) }
     var connectingToIp by remember { mutableStateOf("") } // Track which device we're connecting to
 
     // Only initialize media projection components when not in preview mode
@@ -1805,6 +1816,96 @@ fun AurelayApp(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+
+                    HorizontalDivider()
+
+                    // 诊断日志：出问题时打开开关 → 复现一次 → 上传，日志直接发到中心服务器
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        val diagScope = rememberCoroutineScope()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "诊断日志",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = "没有声音等异常时打开开关，复现一次问题后点「上传日志」，日志会发到你的中心服务器。" +
+                                            "开关立即生效，不受「保存/取消」影响；关着开关也会记录关键事件（连接、音轨、首帧、汇总）。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = diagEnabled,
+                                onCheckedChange = { checked ->
+                                    diagEnabled = checked
+                                    DiagLog.setEnabled(context, checked)
+                                    diagResult =
+                                        if (checked) "已开启诊断日志，请复现一次问题后上传" else "已关闭诊断日志"
+                                }
+                            )
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+
+                        Text(
+                            text = "App 版本：" + DiagLog.appVersion(context) +
+                                    "　日志上传地址：" +
+                                    DiagUploader.resolveUploadUrl(context).ifEmpty { "未配置（请先填写上报接口地址）" },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        if (diagResult.isNotEmpty()) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = diagResult,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    diagText = DiagLog.dump(context)
+                                    showDiagLogDialog = true
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("查看日志")
+                            }
+                            Button(
+                                onClick = {
+                                    diagBusy = true
+                                    diagResult = "正在上传日志…"
+                                    diagScope.launch {
+                                        val text = DiagLog.dump(context)
+                                        val result = withContext(Dispatchers.IO) {
+                                            DiagUploader.upload(context, text)
+                                        }
+                                        diagResult = result
+                                        diagBusy = false
+                                        Toast.makeText(context, result, Toast.LENGTH_LONG).show()
+                                    }
+                                },
+                                enabled = !diagBusy,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(if (diagBusy) "上传中…" else "上传日志")
+                            }
+                        }
+                    }
                 }
             },
             confirmButton = {
@@ -1864,6 +1965,94 @@ fun AurelayApp(
                     Text("取消")
                 }
             }
+        )
+    }
+
+    // 诊断日志查看对话框：可滚动查看，并支持刷新 / 复制 / 分享
+    if (showDiagLogDialog) {
+        val diagScroll = rememberScrollState()
+        AlertDialog(
+            onDismissRequest = { showDiagLogDialog = false },
+            title = {
+                Text(
+                    text = "诊断日志",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "日志文件：" + DiagLog.filePath().ifEmpty { "不可用" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(340.dp)
+                            .verticalScroll(diagScroll)
+                    ) {
+                        Text(
+                            text = diagText,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDiagLogDialog = false }) {
+                    Text("关闭")
+                }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(
+                        onClick = {
+                            diagText = DiagLog.dump(context)
+                            Toast.makeText(context, "日志已刷新", Toast.LENGTH_SHORT).show()
+                        }
+                    ) {
+                        Text("刷新")
+                    }
+                    TextButton(
+                        onClick = {
+                            diagText = DiagLog.dump(context)
+                            try {
+                                val clipboard =
+                                    context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                clipboard?.setPrimaryClip(ClipData.newPlainText("Aurelay 诊断日志", diagText))
+                                Toast.makeText(context, "日志已复制到剪贴板", Toast.LENGTH_SHORT).show()
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "复制失败：${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    ) {
+                        Text("复制")
+                    }
+                    TextButton(
+                        onClick = {
+                            diagText = DiagLog.dump(context)
+                            try {
+                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_SUBJECT, "Aurelay 诊断日志")
+                                    putExtra(Intent.EXTRA_TEXT, diagText)
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(Intent.createChooser(shareIntent, "分享诊断日志"))
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "分享失败：${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    ) {
+                        Text("分享")
+                    }
+                }
+            },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(20.dp)
         )
     }
 }

@@ -12,6 +12,9 @@ import java.nio.ByteBuffer
  * 十几分之一；本类负责把收到的 Opus 包解成 16bit PCM，交给 AudioTrack 播放。
  * 系统从 Android 5.0 起自带软件 Opus 解码器（OMX.google.opus.decoder），
  * 因此无需额外打包 native 库。
+ *
+ * 诊断：本类会通过 DiagLog 记录「收包数 / 解码出块数 / 输入丢弃数」——
+ * 若长时间只进不出，基本可以断定是解码环节卡住（而不是没收到数据）。
  */
 class OpusDecoder(
     // 声道数（1 或 2）
@@ -27,6 +30,8 @@ class OpusDecoder(
         const val BIT_DEPTH = 16
         // csd-0 中的 pre-skip（按 Opus 惯例 3840 个采样点，约 80ms）
         const val PRE_SKIP = 3840
+        // 连续收包多少仍无解码输出时给出告警（20ms/包，约 1 秒）
+        const val NO_OUTPUT_WARN_PACKETS = 50L
     }
 
     // MediaCodec 解码器实例
@@ -37,6 +42,14 @@ class OpusDecoder(
 
     // 送入解码器的时间戳（微秒），仅用于递增占位
     private var timestampUs: Long = 0
+
+    // 诊断计数：送入的包数、解出的 PCM 块数、因缓冲不可用丢弃的包数
+    private var packetsIn = 0L
+    private var framesOut = 0L
+    private var droppedPackets = 0L
+
+    // 无输出告警是否已提示过
+    private var noOutputWarned = false
 
     // 启动解码器：配置 audio/opus 并带上 OpusHead（csd-0）
     fun start(): Boolean {
@@ -50,9 +63,11 @@ class OpusDecoder(
             codec = instance
             running = true
             Log.i(TAG, "Opus 解码器已启动：channels=$channelCount sampleRate=$outputSampleRate")
+            DiagLog.i("解码", "Opus 解码器已启动：输入声道=$channelCount 输出采样率=$outputSampleRate，解码器=${instance.name}")
             true
         } catch (e: Exception) {
             Log.e(TAG, "创建 Opus 解码器失败：${e.javaClass.simpleName} ${e.message}")
+            DiagLog.e("解码", "创建 Opus 解码器失败：${e.javaClass.simpleName} ${e.message}", e)
             running = false
             false
         }
@@ -62,6 +77,7 @@ class OpusDecoder(
     fun decode(packet: ByteArray, size: Int, onPcm: (ByteArray, Int) -> Unit) {
         val instance = codec ?: return
         if (!running || size <= 0 || size > packet.size) return
+        packetsIn++
         try {
             var inIndex = instance.dequeueInputBuffer(10_000)
             if (inIndex < 0) {
@@ -81,11 +97,20 @@ class OpusDecoder(
                     instance.queueInputBuffer(inIndex, 0, 0, timestampUs, 0)
                 }
             } else {
+                droppedPackets++
                 Log.w(TAG, "输入缓冲长时间不可用，丢弃一个 Opus 包")
+                if (droppedPackets % 50 == 1L) {
+                    DiagLog.w("解码", "输入缓冲长时间不可用，已丢弃 $droppedPackets 个 Opus 包")
+                }
             }
             drain(instance, onPcm)
+            if (!noOutputWarned && packetsIn >= NO_OUTPUT_WARN_PACKETS && framesOut == 0L) {
+                noOutputWarned = true
+                DiagLog.w("解码", "已送入 $packetsIn 个 Opus 包但没有任何解码输出，解码环节可能卡住")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Opus 解码异常：${e.javaClass.simpleName} ${e.message}")
+            DiagLog.e("解码", "Opus 解码异常：${e.javaClass.simpleName} ${e.message}", e)
         }
     }
 
@@ -98,11 +123,16 @@ class OpusDecoder(
                 outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> return
                 outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                     val outFormat = instance.outputFormat
-                    Log.i(
-                        TAG,
-                        "解码输出格式变化：sampleRate=${outFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)} " +
-                                "channels=${outFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)}"
-                    )
+                    val rate = outFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    val channels = outFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                    Log.i(TAG, "解码输出格式变化：sampleRate=$rate channels=$channels")
+                    DiagLog.i("解码", "解码输出格式已确定：采样率=$rate 声道=$channels")
+                    if (rate != outputSampleRate) {
+                        DiagLog.w(
+                            "解码",
+                            "解码器实际输出采样率($rate)与音轨采样率($outputSampleRate)不一致，播放会变速"
+                        )
+                    }
                 }
                 outIndex >= 0 -> {
                     try {
@@ -112,6 +142,7 @@ class OpusDecoder(
                             outputBuffer.position(info.offset)
                             outputBuffer.limit(info.offset + info.size)
                             outputBuffer.get(pcm)
+                            framesOut++
                             onPcm(pcm, info.size)
                         }
                     } finally {
@@ -139,6 +170,7 @@ class OpusDecoder(
             // 忽略释放异常
         }
         Log.i(TAG, "Opus 解码器已释放")
+        DiagLog.i("解码", "Opus 解码器已释放：共送入 $packetsIn 包，解出 $framesOut 块 PCM，丢弃 $droppedPackets 包")
     }
 
     // 构造 OpusHead（19 字节，映射族为 0 的单流立体声/单声道头）

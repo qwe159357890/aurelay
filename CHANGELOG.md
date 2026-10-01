@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.4.4] - 2026-10-01
+
+### Added
+- **诊断日志**（设置页新增「诊断日志」区）：没有声音等异常时打开开关、复现一次问题，
+  再点「上传日志」即可把日志发到中心服务器，无需连电脑抓 Logcat。
+  - 关键事件（连接、协议分支、音轨状态、首帧、会话汇总、异常）**始终**记入内存缓冲，
+    因此「先出问题、后开开关」也能拿到上半段现场；
+  - 打开开关后额外写入 `diag/aurelay-diag.log`（超出 800KB 自动轮转，保留 3 份）；
+  - 支持「查看日志 / 复制 / 分享」三种导出方式，作为上传失败时的兜底。
+- 日志内容包含：App 版本与**安装包签名 SHA-1**（用于确认手机上装的是哪个包）、
+  机型与系统、**系统媒体音量与输出设备**、AURL 包头逐字节、AudioTrack 的
+  `state/playState/缓冲/音量/欠载次数/播放头`、每 5 秒的帧率与码率、输出峰值 dBFS、
+  Opus 解码器的收包数与解出块数、以及每次会话结束的汇总行。
+
+### Changed
+- 地址上报的 JSON 解析工具改为包内可见，供日志上传复用（不引入 JSON 库）。
+
 ## [v1.4.3] - 2026-10-01
 
 ### Fixed

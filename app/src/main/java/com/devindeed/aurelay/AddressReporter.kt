@@ -210,8 +210,8 @@ object AddressReporter {
         }
     }
 
-    // 取出 JSON 文本中的整型字段（轻量解析，与构造上报体一样不引入 JSON 依赖）
-    private fun extractJsonInt(json: String, key: String): Int? {
+    // 取出 JSON 文本中的整型字段（轻量解析，与构造上报体一样不引入 JSON 依赖；内部可见以便日志上传复用）
+    internal fun extractJsonInt(json: String, key: String): Int? {
         val marker = '"' + key + '"'
         val at = json.indexOf(marker)
         if (at < 0) return null
@@ -230,8 +230,8 @@ object AddressReporter {
         return digits.toString().toIntOrNull()
     }
 
-    // 取出 JSON 文本中的字符串字段（按 JSON 转义规则还原）
-    private fun extractJsonString(json: String, key: String): String? {
+    // 取出 JSON 文本中的字符串字段（按 JSON 转义规则还原；内部可见以便日志上传复用）
+    internal fun extractJsonString(json: String, key: String): String? {
         val marker = '"' + key + '"'
         val at = json.indexOf(marker)
         if (at < 0) return null

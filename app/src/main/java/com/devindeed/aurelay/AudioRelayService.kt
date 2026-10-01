@@ -10,9 +10,11 @@ import android.app.Service
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Build
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import android.annotation.SuppressLint
@@ -29,6 +31,7 @@ import java.net.Socket
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.security.KeyStore
+import java.util.Locale
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLServerSocket
@@ -94,10 +97,39 @@ class AudioRelayService : Service() {
 
         // 等待流包头 / 读取数据的空闲超时（毫秒），超时则断开该客户端
         private const val IDLE_TIMEOUT_MS = 10_000L
+
+        // 周期诊断日志的输出间隔（毫秒），仅日志开关打开时记录
+        private const val REPORT_INTERVAL_MS = 5_000L
+    }
+
+    // 单次接收会话的诊断统计（用于回答「数据到底走到哪一步了」）
+    private class DiagSession(val branch: String) {
+        // 已写入 AudioTrack 的数据块数（PCM 分支即收到的分片数，Opus 分支为解码出的 PCM 数）
+        var frames = 0L
+        // 已写入 AudioTrack 的字节数
+        var bytes = 0L
+        // 收到的 Opus 包数（PCM 分支与 frames 相同）
+        var packets = 0L
+        // 单块最大字节数
+        var maxChunk = 0
+        // 全程 PCM 峰值绝对值（0 ~ 32768）
+        var peak = 0
+        // 会话开始时间
+        var startedAt = System.currentTimeMillis()
+        // 是否已记录首块十六进制预览
+        var firstChunkLogged = false
+        // 是否已记录首个 Opus 包预览
+        var firstPacketLogged = false
+        // 上一次周期统计的时间与基线
+        var lastAt = System.currentTimeMillis()
+        var lastFrames = 0L
+        var lastBytes = 0L
     }
 
     override fun onCreate() {
         super.onCreate()
+        // 安装诊断日志器（开关来自设置页，本地文件位于 diag/aurelay-diag.log）
+        DiagLog.install(this)
         mediaSession = MediaSessionCompat(this, "AudioRelay")
         notificationManager = NotificationManagerCompat.from(this)
         createNotificationChannel()
@@ -107,6 +139,8 @@ class AudioRelayService : Service() {
         // 启动地址上报（外网模式：把本机 IPv4/IPv6 同步到用户自己的中心服务器）
         AddressReporter.start(this)
         Log.i("AudioRelay", "Service onCreate called, foreground started.")
+        DiagLog.i("服务", "接收服务已启动：监听端口 $AUDIO_PORT，TLS=$useTls")
+        DiagLog.i("环境", DiagLog.environment(this))
     }
 
     private var discoveryThread: Thread? = null
@@ -220,6 +254,9 @@ class AudioRelayService : Service() {
                     serverThread = Thread { startAudioServer() }
                     serverThread?.start()
                     Log.i("AudioRelay", "Service onStartCommand: useTls=$useTls, server thread started.")
+                    DiagLog.i("服务", "onStartCommand：启动接收线程（useTls=$useTls）")
+                } else {
+                    DiagLog.i("服务", "onStartCommand：接收线程已在运行，忽略本次启动")
                 }
                 return START_STICKY
             }
@@ -328,6 +365,7 @@ class AudioRelayService : Service() {
                 serverSocket = ServerSocket(AUDIO_PORT)
                 Log.i("AudioRelay", "Plain TCP. Listening on port $AUDIO_PORT")
             }
+            DiagLog.i("监听", "已在 $AUDIO_PORT 端口开始监听（TLS=$useTls），等待电脑端连接")
 
             while (isServerRunning) {
                 try {
@@ -336,6 +374,7 @@ class AudioRelayService : Service() {
                         serverSocket?.accept()
                     } catch (sslEx: javax.net.ssl.SSLException) {
                         Log.e("AudioRelay", "SSL exception during accept (possible TLS/plain mismatch): ${sslEx.message}", sslEx)
+                        DiagLog.e("监听", "接受连接时发生 TLS 异常（可能是 TLS/明文不匹配）", sslEx)
                         null
                     }
 
@@ -345,6 +384,7 @@ class AudioRelayService : Service() {
                 } catch (e: IOException) {
                     if (isServerRunning) {
                         Log.e("AudioRelay", "Error accepting client or reading data: ", e)
+                        DiagLog.e("监听", "接受连接或读取数据出错", e)
                     }
                 }
             }
@@ -371,6 +411,7 @@ class AudioRelayService : Service() {
         client.tcpNoDelay = true // Disable Nagle's algorithm for lower latency
         client.receiveBufferSize = 4096 // Smaller buffer for lower latency
         Log.i("AudioRelay", "Client connected: ${client.inetAddress.hostAddress}")
+        DiagLog.i("连接", "电脑端已连接：${client.inetAddress.hostAddress}:${client.port}（本机端口 $AUDIO_PORT）")
 
         // Update notification with sender name (check runtime permission on Android 13+)
         notifyConnected()
@@ -390,6 +431,7 @@ class AudioRelayService : Service() {
         lastClientIp = try { client.inetAddress.hostAddress ?: "" } catch (ex: Exception) { "" }
 
         var decoder: OpusDecoder? = null
+        var session: DiagSession? = null
         try {
             val rawInput = client.getInputStream()
             val input = PushbackInputStream(rawInput, HEADER_SIZE)
@@ -410,8 +452,15 @@ class AudioRelayService : Service() {
                     "AudioRelay",
                     "检测到自研流包头：codec=$codec channels=$streamChannels sampleRate=$streamSampleRate"
                 )
+                DiagLog.i(
+                    "协议",
+                    "收到自研 AURL 包头 [${header.joinToString(" ") { "%02x".format(it) }}]：" +
+                            "编码=${if (codec == CODEC_OPUS) "Opus" else "裸PCM"} " +
+                            "声道=$streamChannels 采样率=$streamSampleRate"
+                )
             } else {
                 Log.i("AudioRelay", "未检测到自研流包头，按官方裸 PCM 流处理（44.1kHz / 立体声）")
+                DiagLog.i("协议", "未检测到 AURL 包头，按官方裸 PCM 流处理（44100Hz / 立体声）")
             }
 
             // Opus 解码输出固定为 48kHz，音频轨必须按该采样率创建，否则播放会变速
@@ -423,31 +472,48 @@ class AudioRelayService : Service() {
             val track = ensureAudioTrack(playbackRate, outChannels)
             if (track == null) {
                 Log.e("AudioRelay", "AudioTrack 创建失败，断开本次连接")
+                DiagLog.e("音轨", "AudioTrack 创建失败，本次连接无法出声音，主动断开")
                 return
             }
+            DiagLog.i("音轨", "播放音轨已就绪：${trackSnapshot(track)}；${mediaVolumeInfo()}")
 
             // Opus 模式需要系统解码器（Android 自带 software opus decoder）
             if (isOpus) {
                 decoder = OpusDecoder(streamChannels, playbackRate)
                 if (!decoder.start()) {
                     Log.e("AudioRelay", "Opus 解码器初始化失败，断开本次连接")
+                    DiagLog.e("解码", "Opus 解码器初始化失败（系统无可用 audio/opus 解码器），断开本次连接")
                     return
                 }
             }
 
+            val currentSession = DiagSession(branchName(framed, isOpus))
+            session = currentSession
+            DiagLog.i(
+                "会话",
+                "本次接收分支：「${currentSession.branch}」，输出采样率=$playbackRate 输出声道=$outChannels"
+            )
+
             if (framed) {
                 if (isOpus) {
-                    streamFramedOpus(input, track, decoder, outChannels, streamChannels * 2)
+                    streamFramedOpus(input, track, decoder, outChannels, streamChannels * 2, currentSession)
                 } else {
-                    streamFramedPcm(input, track, outChannels)
+                    streamFramedPcm(input, track, outChannels, currentSession)
                 }
             } else {
-                streamRawPcm(input, track, outChannels)
+                streamRawPcm(input, track, outChannels, currentSession)
             }
         } catch (e: Exception) {
             Log.e("AudioRelay", "客户端会话异常：${e.message}", e)
+            DiagLog.e("会话", "客户端会话异常：${e.message}", e)
         } finally {
             try { decoder?.stop() } catch (e: Exception) { /* 忽略 */ }
+            // 会话汇总：这是判断「数据到底有没有走完链路」最直接的一行
+            val finished = session
+            if (finished != null) {
+                DiagLog.i("汇总", "接收结束：${sessionSummary(finished)}")
+                DiagLog.i("汇总", "结束时的音轨状态：${audioTrackSnapshot()}")
+            }
             // 只暂停并清空缓冲、不释放音轨：下一路客户端连接时 ensureAudioTrack()
             // 会重新 play()。若这里写 stop()，音轨会停在 STOPPED 状态，
             // 后续会话复用同一个音轨时就会「连着但没声音」。
@@ -458,6 +524,7 @@ class AudioRelayService : Service() {
                 // 忽略暂停异常
             }
             Log.i("AudioRelay", "Client disconnected.")
+            DiagLog.i("连接", "电脑端已断开连接")
             // Clear client info and update notification
             lastClientName = ""
             notifyConnected()
@@ -521,7 +588,12 @@ class AudioRelayService : Service() {
     }
 
     // 官方裸 PCM 流：直接写 AudioTrack（与改造前行为一致）
-    private fun streamRawPcm(input: InputStream, track: AudioTrack, outChannels: Int) {
+    private fun streamRawPcm(
+        input: InputStream,
+        track: AudioTrack,
+        outChannels: Int,
+        session: DiagSession
+    ) {
         val buffer = ByteArray(4096)
         var read: Int
         var frameCount = 0
@@ -530,34 +602,47 @@ class AudioRelayService : Service() {
         while (isServerRunning && consecutiveErrors < 5) {
             try {
                 read = input.read(buffer)
-                if (read == -1) break
+                if (read == -1) {
+                    DiagLog.i("接收", "裸 PCM 流结束：对端已关闭连接")
+                    break
+                }
                 consecutiveErrors = 0
                 if (read > 0) {
+                    recordChunk(session, buffer, read)
                     writeToTrack(track, buffer, read, frameSize, outChannels)
                     if (++frameCount % 5 == 0) {
                         broadcastAudioLevels(calculateAudioLevels(buffer, read))
                     }
+                    reportSession(session, track)
                 }
             } catch (e: java.net.SocketTimeoutException) {
                 continue
             } catch (e: IOException) {
                 consecutiveErrors++
                 Log.w("AudioRelay", "Read error $consecutiveErrors/5: ${e.message}")
+                DiagLog.w("接收", "裸 PCM 读取失败 $consecutiveErrors/5：${e.message}")
             }
         }
     }
 
     // 自研分帧 PCM 流：每帧 = 4 字节大端长度 + PCM 数据
-    private fun streamFramedPcm(input: InputStream, track: AudioTrack, outChannels: Int) {
+    private fun streamFramedPcm(
+        input: InputStream,
+        track: AudioTrack,
+        outChannels: Int,
+        session: DiagSession
+    ) {
         val frameSize = outChannels * 2
         var frameCount = 0
         while (isServerRunning) {
             val payload = readFrame(input) ?: break
             if (payload.isEmpty()) continue
+            recordChunk(session, payload, payload.size)
             writeToTrack(track, payload, payload.size, frameSize, outChannels)
             if (++frameCount % 5 == 0) {
                 broadcastAudioLevels(calculateAudioLevels(payload, payload.size))
             }
+            reportSession(session, track)
         }
     }
 
@@ -567,19 +652,28 @@ class AudioRelayService : Service() {
         track: AudioTrack,
         decoder: OpusDecoder?,
         outChannels: Int,
-        inputFrameSize: Int
+        inputFrameSize: Int,
+        session: DiagSession
     ) {
         if (decoder == null) return
         var frameCount = 0
         while (isServerRunning) {
             val packet = readFrame(input) ?: break
             if (packet.isEmpty()) continue
+            session.packets++
+            if (!session.firstPacketLogged) {
+                session.firstPacketLogged = true
+                val preview = packet.take(minOf(packet.size, 16)).joinToString(" ") { "%02x".format(it) }
+                DiagLog.i("接收", "首个 Opus 包已到达：长度=${packet.size} 字节，前 ${minOf(packet.size, 16)} 字节=[$preview]")
+            }
             decoder.decode(packet, packet.size) { pcm, size ->
+                recordChunk(session, pcm, size)
                 writeToTrack(track, pcm, size, inputFrameSize, outChannels)
                 if (++frameCount % 5 == 0) {
                     broadcastAudioLevels(calculateAudioLevels(pcm, size))
                 }
             }
+            reportSession(session, track)
         }
     }
 
@@ -638,7 +732,7 @@ class AudioRelayService : Service() {
             } else {
                 AudioTrack.WRITE_NON_BLOCKING
             }
-            if (outChannels == 2 && inputFrameSize == 4) {
+            val result = if (outChannels == 2 && inputFrameSize == 4) {
                 track.write(buffer, 0, alignedBytes, writeMode)
             } else if (outChannels == 1 && inputFrameSize == 4) {
                 val mono = convertStereoToMono(buffer, alignedBytes)
@@ -647,8 +741,13 @@ class AudioRelayService : Service() {
                 // 输入已是单声道，直接写
                 track.write(buffer, 0, alignedBytes, writeMode)
             }
+            // 负数是 AudioTrack 的错误码（非阻塞模式下缓冲满会返回 0，属正常）
+            if (result < 0) {
+                DiagLog.w("音轨", "AudioTrack.write 返回错误码 $result（写入长度=$alignedBytes，写入模式=$writeMode）")
+            }
         } catch (e: Exception) {
             Log.e("AudioRelay", "AudioTrack write exception: ${e.message}", e)
+            DiagLog.e("音轨", "AudioTrack 写入异常：${e.message}", e)
         }
     }
 
@@ -680,9 +779,13 @@ class AudioRelayService : Service() {
                     existing.flush()
                     existing.play()
                     Log.i("AudioRelay", "AudioTrack 已重新 play()：上一次会话残留为停止态")
+                    DiagLog.w("音轨", "复用音轨时发现它不在播放态（playState=${playStateName(existing.playState)}），已 flush 并重新 play")
                 } catch (e: Exception) {
                     Log.e("AudioRelay", "AudioTrack 恢复播放失败：${e.message}", e)
+                    DiagLog.e("音轨", "AudioTrack 恢复播放失败：${e.message}", e)
                 }
+            } else {
+                DiagLog.i("音轨", "复用已存在的音轨（${trackSnapshot(existing)}）")
             }
             return existing
         }
@@ -706,6 +809,7 @@ class AudioRelayService : Service() {
         )
         if (minBufSize <= 0) {
             Log.e("AudioRelay", "AudioTrack.getMinBufferSize 返回 $minBufSize，采样率 $sampleRate 不受支持")
+            DiagLog.e("音轨", "该采样率不被支持：getMinBufferSize 返回 $minBufSize（采样率=$sampleRate）")
             return null
         }
         // Use a larger buffer than the minimum to avoid underruns with network jitter
@@ -731,6 +835,7 @@ class AudioRelayService : Service() {
         val built = builder.build()
         if (built.state != AudioTrack.STATE_INITIALIZED) {
             Log.e("AudioRelay", "AudioTrack 初始化失败，state=${built.state}")
+            DiagLog.e("音轨", "AudioTrack 初始化失败，state=${built.state}")
             built.release()
             return null
         }
@@ -745,6 +850,7 @@ class AudioRelayService : Service() {
         currentSampleRate = sampleRate
         currentOutChannels = outChannels
         Log.i("AudioRelay", "AudioTrack 已就绪：sampleRate=$sampleRate channels=$outChannels buffer=$bufferSizeBytes")
+        DiagLog.i("音轨", "新建音轨成功：${trackSnapshot(built)}")
         return built
     }
 
@@ -825,6 +931,130 @@ class AudioRelayService : Service() {
         } catch (e: Exception) {
             // Silently ignore broadcast errors to avoid spam
         }
+    }
+
+    // 中文命名本次接收分支（日志里一眼能看出走的哪条链路）
+    private fun branchName(framed: Boolean, isOpus: Boolean): String = when {
+        !framed -> "官方裸PCM"
+        isOpus -> "自研分帧Opus"
+        else -> "自研分帧PCM"
+    }
+
+    // 统计一块已收到的 PCM 数据（帧数 / 字节数 / 峰值），首块额外记录现场预览
+    private fun recordChunk(session: DiagSession, data: ByteArray, size: Int) {
+        session.frames++
+        session.bytes += size
+        if (size > session.maxChunk) session.maxChunk = size
+        var localPeak = 0
+        var index = 0
+        while (index + 1 < size) {
+            val sample = ((data[index].toInt() and 0xFF) or (data[index + 1].toInt() shl 8)).toShort().toInt()
+            val abs = if (sample < 0) -sample else sample
+            if (abs > localPeak) localPeak = abs
+            index += 2
+        }
+        if (localPeak > session.peak) session.peak = localPeak
+        if (!session.firstChunkLogged) {
+            session.firstChunkLogged = true
+            val preview = data.take(minOf(size, 16)).joinToString(" ") { "%02x".format(it) }
+            DiagLog.i(
+                "接收",
+                "首个音频数据到达：分支=${session.branch} 长度=$size 字节，前 ${minOf(size, 16)} 字节=[$preview]，峰值=${peakDb(localPeak)}"
+            )
+        }
+    }
+
+    // 每 5 秒输出一次周期诊断（帧率 / 码率 / 输出电平 / 音轨状态），仅日志开关打开时记录
+    private fun reportSession(session: DiagSession, track: AudioTrack) {
+        val now = System.currentTimeMillis()
+        val elapsed = now - session.lastAt
+        if (elapsed < REPORT_INTERVAL_MS) return
+        val frames = session.frames - session.lastFrames
+        val bytes = session.bytes - session.lastBytes
+        val fps = frames * 1000.0 / elapsed
+        val kbps = bytes * 8.0 / elapsed
+        DiagLog.d(
+            "周期",
+            "分支=${session.branch} 帧率=${String.format(Locale.US, "%.1f", fps)}/s " +
+                    "码率=${String.format(Locale.US, "%.0f", kbps)}kbps 累计帧=${session.frames} " +
+                    "累计=${session.bytes}字节 输出峰值=${peakDb(session.peak)}"
+        )
+        DiagLog.d("周期", "音轨：${trackSnapshot(track)}；${mediaVolumeInfo()}")
+        session.lastAt = now
+        session.lastFrames = session.frames
+        session.lastBytes = session.bytes
+    }
+
+    // 汇总一次会话的接收结果（判断链路走到哪一步的核心依据）
+    private fun sessionSummary(session: DiagSession): String {
+        val seconds = (System.currentTimeMillis() - session.startedAt) / 1000.0
+        return "分支=${session.branch} 时长=${String.format(Locale.US, "%.1f", seconds)}s " +
+                "收到Opus包=${session.packets} 写入音轨块数=${session.frames} " +
+                "写入字节=${session.bytes} 单块最大=${session.maxChunk}字节 " +
+                "全程峰值=${peakDb(session.peak)}"
+    }
+
+    // 采集当前音轨状态（音轨已释放时给出中文说明）
+    private fun audioTrackSnapshot(): String {
+        val track = audioTrack ?: return "音轨已为空"
+        return trackSnapshot(track)
+    }
+
+    // 采集 AudioTrack 的运行时状态（排查「有数据但没声音」的关键依据）
+    private fun trackSnapshot(track: AudioTrack): String {
+        return try {
+            val underruns = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) track.underrunCount else -1
+            val head = track.playbackHeadPosition
+            "state=${stateName(track.state)} playState=${playStateName(track.playState)} " +
+                    "采样率=${track.sampleRate} 声道=${track.channelCount} " +
+                    "缓冲=${track.bufferSizeInBytes}字节 音量=${track.volume} 欠载=$underruns 播放头=$head"
+        } catch (e: Exception) {
+            "读取音轨状态失败：${e.message}"
+        }
+    }
+
+    // 把 AudioTrack.state 翻译成中文
+    private fun stateName(state: Int): String = when (state) {
+        AudioTrack.STATE_INITIALIZED -> "已初始化"
+        AudioTrack.STATE_NO_STATIC_DATA -> "静态数据未就绪"
+        AudioTrack.STATE_UNINITIALIZED -> "未初始化"
+        else -> "未知($state)"
+    }
+
+    // 把 AudioTrack.playState 翻译成中文（stop() 不会改变 state，只能靠它判断是否真的在播）
+    private fun playStateName(playState: Int): String = when (playState) {
+        AudioTrack.PLAYSTATE_PLAYING -> "播放中"
+        AudioTrack.PLAYSTATE_PAUSED -> "已暂停"
+        AudioTrack.PLAYSTATE_STOPPED -> "已停止"
+        else -> "未知($playState)"
+    }
+
+    // 采集系统媒体音量与输出设备（不少「完全没声音」其实是媒体音量为 0）
+    private fun mediaVolumeInfo(): String {
+        return try {
+            val manager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val current = manager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            val max = manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val muted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                manager.isStreamMute(AudioManager.STREAM_MUSIC)
+            } else {
+                false
+            }
+            val devices = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).joinToString("/") { it.type.toString() }
+            } else {
+                "未知"
+            }
+            "媒体音量=$current/$max 静音=$muted 输出设备类型=$devices"
+        } catch (e: Exception) {
+            "媒体音量读取失败：${e.message}"
+        }
+    }
+
+    // 把 PCM 峰值转成 dBFS 文本（峰值 0 表示采样点全为 0，即静音）
+    private fun peakDb(peak: Int): String {
+        if (peak <= 0) return "-∞dBFS(全静音)"
+        return String.format(Locale.US, "%.1fdBFS", 20 * Math.log10(peak / 32768.0))
     }
 
     override fun onDestroy() {
