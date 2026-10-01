@@ -495,6 +495,8 @@ fun AurelayApp(
     onClientIpSelected: (String) -> Unit
 ) {
     val deviceIp = remember { getDeviceIpAddress(context) }
+    // 本机全部可用地址（含 IPv6），外网直连时可人工核对
+    val localAddresses = remember { AddressReporter.collectAddresses() }
     val port = "5000" // Fixed port matching the service
     
     // Get preferences
@@ -838,7 +840,23 @@ fun AurelayApp(
                                     )
 
                                     Spacer(Modifier.height(20.dp))
-                                    
+
+                                    Text(
+                                        "Local IPv6 (for remote use)",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        letterSpacing = 0.5.sp
+                                    )
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(
+                                        localAddresses.second.firstOrNull() ?: "No IPv6 available",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+
+                                    Spacer(Modifier.height(20.dp))
+
                                     HorizontalDivider(
                                         modifier = Modifier.fillMaxWidth(0.3f),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
@@ -1482,6 +1500,10 @@ fun AurelayApp(
         var tempThemeMode by remember { mutableStateOf(prefs.getString("theme_mode", "system") ?: "system") }
         var tempUseDynamicColors by remember { mutableStateOf(prefs.getBoolean("use_dynamic_colors", true)) }
         var tempAudioOutputMode by remember { mutableStateOf(prefs.getString("audio_output_mode", "this_device") ?: "this_device") }
+        // 外网地址上报相关临时状态（保存后才落盘）
+        var tempReportEnabled by remember { mutableStateOf(prefs.getBoolean(AddressReporter.KEY_ENABLED, false)) }
+        var tempReportUrl by remember { mutableStateOf(prefs.getString(AddressReporter.KEY_URL, "") ?: "") }
+        var tempReportToken by remember { mutableStateOf(prefs.getString(AddressReporter.KEY_TOKEN, "") ?: "") }
         
         val configuration = LocalConfiguration.current
         val screenHeight = configuration.screenHeightDp.dp
@@ -1725,6 +1747,64 @@ fun AurelayApp(
                             onCheckedChange = { tempShowVisualizer = it }
                         )
                     }
+
+                    HorizontalDivider()
+
+                    // 外网地址上报：把本机 IPv4/IPv6 定时同步到用户自己的中心服务器
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Public Address Reporting",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = "Report this device's public IPv4/IPv6 to your server so the desktop sender can reach it over the internet",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = tempReportEnabled,
+                                onCheckedChange = { tempReportEnabled = it }
+                            )
+                        }
+
+                        Spacer(Modifier.height(10.dp))
+
+                        OutlinedTextField(
+                            value = tempReportUrl,
+                            onValueChange = { tempReportUrl = it },
+                            label = { Text("Report endpoint URL") },
+                            placeholder = { Text("http://your-server:8001/api/aurelay/report") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(Modifier.height(8.dp))
+
+                        OutlinedTextField(
+                            value = tempReportToken,
+                            onValueChange = { tempReportToken = it },
+                            label = { Text("Report token") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(Modifier.height(8.dp))
+
+                        Text(
+                            text = "Last result: " + (prefs.getString(AddressReporter.KEY_LAST_RESULT, "never") ?: "never"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             },
             confirmButton = {
@@ -1739,7 +1819,24 @@ fun AurelayApp(
                             putString("theme_mode", tempThemeMode)
                             putBoolean("use_dynamic_colors", tempUseDynamicColors)
                             putString("audio_output_mode", tempAudioOutputMode)
+                            putBoolean(AddressReporter.KEY_ENABLED, tempReportEnabled)
+                            putString(AddressReporter.KEY_URL, tempReportUrl.trim())
+                            putString(AddressReporter.KEY_TOKEN, tempReportToken.trim())
                             apply()
+                        }
+
+                        // 地址上报配置变更后立即生效：先停旧的，再按新配置启动
+                        try {
+                            AddressReporter.stop(context)
+                            if (tempReportEnabled && tempReportUrl.trim().isNotEmpty()) {
+                                AddressReporter.start(context)
+                                AddressReporter.reportNow(context)
+                                Toast.makeText(context, "Address reporting enabled", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Address reporting disabled", Toast.LENGTH_SHORT).show()
+                            }
+                        } catch (e: Exception) {
+                            Log.e("AurelayReport", "更新上报配置失败：${e.message}")
                         }
                         
                         // Restart service if audio output mode changed and service is running in broadcast mode

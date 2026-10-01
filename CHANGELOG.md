@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.4.0] - 2026-10-01
+
+### Added
+- 外网地址上报：在「服务启动 / 每 60 秒 / 网络切换」三种时机，把本机 IPv4、IPv6 地址
+  上报到自建中心服务器，供 PC 发送端在公网直连（蜂窝网络下地址会随时变化）。
+- 自研流协议 `AURL`：在官方「裸 PCM」之上扩展「分帧 + 可选 Opus 编码」，
+  蜂窝网络下可把流量降到裸 PCM 的十几分之一；未带包头的官方发送端保持兼容。
+- 设置页新增「Public Address Reporting」配置（上报地址、令牌、开关与最近一次结果）。
+- 主界面「Connection Details」新增本机 IPv6 地址显示，便于外网直连时人工核对。
+
+### Changed
+- 音频接收链路重构：按流协商出的采样率与声道数动态创建 AudioTrack；
+  Opus 流按系统解码器的 48kHz 输出对齐，避免变速。
+- 发布流程：仅构建 APK，移除 Play Store 上传步骤与 AAB 构建。
+
 ## [v1.2.0-rc1] - 2025-12-07
 
 ### Added
