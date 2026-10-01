@@ -126,7 +126,7 @@ class AudioRelayService : Service() {
                         val msg = String(packet.data, 0, packet.length).trim()
                         if (msg == DISCOVERY_REQUEST) {
                             // Respond with service info — desktop will use packet source address
-                            val deviceName = Build.MODEL.ifEmpty { "Android Device" }.replace(";", "_")
+                            val deviceName = Build.MODEL.ifEmpty { "Android 设备" }.replace(";", "_")
                             val response = "$DISCOVERY_RESPONSE;$AUDIO_PORT;$deviceName"
                             val respData = response.toByteArray()
                             val respPacket = DatagramPacket(respData, respData.size, packet.address, packet.port)
@@ -136,7 +136,7 @@ class AudioRelayService : Service() {
                             // A sender wants to connect — send confirmation request to UI
                             try {
                                 val parts = msg.split(";")
-                                val senderName = parts.getOrNull(1) ?: "Android Device"
+                                val senderName = parts.getOrNull(1) ?: "Android 设备"
                                 // Store the sender name for notification updates
                                 lastClientName = senderName
                                 val bcast = Intent(MainActivity.ACTION_CONNECTION_REQUEST)
@@ -251,25 +251,25 @@ class AudioRelayService : Service() {
 
         // Get sender device name (if connected) or show "Ready to receive"
         val displayText = if (lastClientName.isNotEmpty()) {
-            "Streaming from $lastClientName"
+            "正在接收来自 $lastClientName 的音频"
         } else {
-            "Ready to receive audio"
+            "等待接收音频"
         }
 
         val builder =
             NotificationCompat.Builder(this, "audioRelayChannel")
-                .setContentTitle("Aurelay")
+                .setContentTitle("Aurelay 声音中继")
                 .setContentText(displayText)
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setContentIntent(openAppPendingIntent)
                 .addAction(
                     android.R.drawable.ic_menu_close_clear_cancel,
-                    "Disconnect",
+                    "断开连接",
                     disconnectPendingIntent
                 )
                 .addAction(
                     android.R.drawable.ic_menu_preferences,
-                    "Open App",
+                    "打开应用",
                     openAppPendingIntent
                 )
                 .setStyle(
@@ -285,7 +285,7 @@ class AudioRelayService : Service() {
             val channel =
                 NotificationChannel(
                     "audioRelayChannel",
-                    "Audio Relay Channel",
+                    "音频中继服务",
                     NotificationManager.IMPORTANCE_LOW
                 )
             notificationManager.createNotificationChannel(channel)
