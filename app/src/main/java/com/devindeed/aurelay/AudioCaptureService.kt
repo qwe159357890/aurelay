@@ -9,12 +9,10 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.AudioManager
-import android.media.projection.MediaProjection
-import android.media.projection.MediaProjectionManager
+import android.media.MediaRecorder
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -33,7 +31,6 @@ class AudioCaptureService : Service() {
 
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
-    private var mediaProjection: MediaProjection? = null
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null // For local playback
     private var clientSocket: Socket? = null
@@ -140,41 +137,25 @@ class AudioCaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                val resultData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(EXTRA_RESULT_DATA)
-                }
-                
                 targetIp = intent.getStringExtra(EXTRA_TARGET_IP) ?: ""
                 targetPort = intent.getIntExtra(EXTRA_TARGET_PORT, 5000)
                 audioOutputMode = intent.getStringExtra(EXTRA_AUDIO_OUTPUT_MODE) ?: "remote_only"
 
-                if (resultData != null && targetIp.isNotEmpty()) {
+                if (targetIp.isNotEmpty()) {
+                    // 电脑放音只需麦克风，不申请屏幕投射 → 系统不会弹「录制或投射」提示
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         ServiceCompat.startForeground(
                             this,
                             NOTIFICATION_ID,
                             createNotification(),
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-                                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                            else 0
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                         )
                     } else {
                         startForeground(NOTIFICATION_ID, createNotification())
                     }
-
-                    val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                    val projection = projectionManager.getMediaProjection(android.app.Activity.RESULT_OK, resultData)
-                    if (projection != null) {
-                         startCapture(projection)
-                    } else {
-                         Log.e(TAG, "MediaProjection is null")
-                         stopSelf()
-                    }
+                    startCapture()
                 } else {
-                    Log.e(TAG, "Missing result data or target IP")
+                    Log.e(TAG, "缺少目标电脑 IP")
                     stopSelf()
                 }
             }
@@ -185,34 +166,40 @@ class AudioCaptureService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun startCapture(projection: MediaProjection) {
-        mediaProjection = projection
+    // 启动麦克风采集并推流（电脑放音模式：手机当电脑的无线麦克风）
+    private fun startCapture() {
+        // ⚠️ 关键点：电脑放音要的是「手机麦克风的声音」，采集源必须是 MIC，
+        //    不能用 MediaProjection 的 AudioPlaybackCapture——那录的是系统内部声音。
+        //    用内录有两个坏处：
+        //      ① 系统必弹「要开始录制或投射内容吗？」，用户看了莫名其妙；
+        //      ② 录到的是手机内部播放声，不是人说话声，电脑上听不到人声。
+        //    因此这里不再申请屏幕投射，也就不会弹那个提示。
+        val audioFormat = AudioFormat.Builder()
+            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .setSampleRate(48000)  // 与 Opus 编码规格一致（48kHz）
+            .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
+            .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val config = AudioPlaybackCaptureConfiguration.Builder(projection)
-                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                // Exclude our own app's audio to prevent feedback loop
-                .excludeUid(android.os.Process.myUid())
-                .build()
+        val minBufferSize = AudioRecord.getMinBufferSize(
+            48000,
+            AudioFormat.CHANNEL_IN_STEREO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        // 缓冲取「系统最小值」与「20ms 立体声帧」的较大者，保证能装下一整帧
+        val bufferSize = maxOf(minBufferSize, 48000 * 2 * 2 * 20 / 1000)
 
-            val audioFormat = AudioFormat.Builder()
-                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setSampleRate(48000)  // 与 Opus 编码规格一致（48kHz）
-                .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
-                .build()
+        try {
+            // Only start AudioRecord for modes that need streaming
+            if (audioOutputMode == "remote_only" || audioOutputMode == "both_devices") {
+                audioRecord = AudioRecord.Builder()
+                    .setAudioSource(MediaRecorder.AudioSource.MIC)
+                    .setAudioFormat(audioFormat)
+                    .setBufferSizeInBytes(bufferSize)
+                    .build()
 
-            try {
-                // Only start AudioRecord for modes that need streaming
-                if (audioOutputMode == "remote_only" || audioOutputMode == "both_devices") {
-                    audioRecord = AudioRecord.Builder()
-                        .setAudioFormat(audioFormat)
-                        .setAudioPlaybackCaptureConfig(config)
-                        .build()
-
-                    audioRecord?.startRecording()
-                    isStreaming = true
-                }
+                audioRecord?.startRecording()
+                isStreaming = true
+            }
                 
                 // Initialize local audio playback ONLY for both_devices mode
                 // In this_device mode, audio already plays naturally on the device
@@ -442,8 +429,6 @@ class AudioCaptureService : Service() {
         audioTrack?.release()
         audioTrack = null
 
-        mediaProjection?.stop()
-        mediaProjection = null
 
         super.onDestroy()
     }

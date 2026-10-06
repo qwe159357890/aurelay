@@ -296,7 +296,7 @@
         <service
             android:name=".AudioCaptureService"
             android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
+            android:foregroundServiceType="microphone" />
 
         <receiver
             android:name=".BootReceiver"

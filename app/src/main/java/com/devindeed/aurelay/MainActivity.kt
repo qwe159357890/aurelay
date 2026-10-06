@@ -77,7 +77,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
 import com.devindeed.aurelay.iap.PurchaseManager
 import com.devindeed.aurelay.ui.SmartAdBanner
-import android.media.projection.MediaProjectionManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.widget.Toast
@@ -547,33 +546,7 @@ fun AurelayApp(
 
     // Only initialize media projection components when not in preview mode
     val isPreview = LocalInspectionMode.current
-    val mediaProjectionManager = if (!isPreview) {
-        context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
-    } else null
     
-    val startMediaProjection = if (!isPreview) {
-        rememberLauncherForActivityResult(
-            contract = ActivityResultContracts.StartActivityForResult()
-        ) { result ->
-            if (result.resultCode == android.app.Activity.RESULT_OK) {
-                // Check if a receiver is selected
-                if (clientIp.isEmpty()) {
-                    Toast.makeText(context, "请先选择一台接收端设备", Toast.LENGTH_LONG).show()
-                    return@rememberLauncherForActivityResult
-                }
-                
-                val intent = Intent(context, AudioCaptureService::class.java).apply {
-                    action = AudioCaptureService.ACTION_START
-                    putExtra(AudioCaptureService.EXTRA_RESULT_DATA, result.data)
-                    putExtra(AudioCaptureService.EXTRA_TARGET_IP, clientIp)
-                    putExtra(AudioCaptureService.EXTRA_TARGET_PORT, 5000)
-                    putExtra(AudioCaptureService.EXTRA_AUDIO_OUTPUT_MODE, audioOutputMode)
-                }
-                ContextCompat.startForegroundService(context, intent)
-                isServiceRunning = true
-            }
-        }
-    } else null
     
     // Reset selection when service stops unexpectedly
     LaunchedEffect(isClientConnected) {
@@ -595,13 +568,18 @@ fun AurelayApp(
             contract = ActivityResultContracts.RequestPermission()
         ) { isGranted: Boolean ->
             if (isGranted) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    mediaProjectionManager?.let { manager ->
-                        startMediaProjection?.launch(manager.createScreenCaptureIntent())
-                    }
+                // 电脑放音只需要麦克风：授权后直接拉起采集服务，不再申请屏幕投射，
+                // 系统因此不会再弹「要开始录制或投射内容吗？」
+                val intent = Intent(context, AudioCaptureService::class.java).apply {
+                    action = AudioCaptureService.ACTION_START
+                    putExtra(AudioCaptureService.EXTRA_TARGET_IP, clientIp)
+                    putExtra(AudioCaptureService.EXTRA_TARGET_PORT, 5000)
+                putExtra(AudioCaptureService.EXTRA_AUDIO_OUTPUT_MODE, audioOutputMode)
                 }
+                ContextCompat.startForegroundService(context, intent)
+                isServiceRunning = true
             } else {
-                 Toast.makeText(context, "广播音频需要录音权限。", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "电脑放音需要录音权限。", Toast.LENGTH_LONG).show()
             }
         }
     } else null
@@ -1049,7 +1027,7 @@ fun AurelayApp(
                                                         horizontalArrangement = Arrangement.SpaceBetween
                                                     ) {
                                                         Row(
-                                                            modifier = Modifier.weight(1f, fill = false),
+                                                            modifier = Modifier.weight(1f),
                                                             verticalAlignment = Alignment.CenterVertically
                                                         ) {
                                                             Icon(
@@ -1059,17 +1037,22 @@ fun AurelayApp(
                                                                 modifier = Modifier.size(24.dp)
                                                             )
                                                             Spacer(Modifier.width(10.dp))
-                                                            Column {
+                                                            Column(
+                                                                modifier = Modifier.weight(1f)
+                                                            ) {
                                                                 Text(
                                                                     device.name,
                                                                     fontWeight = FontWeight.SemiBold,
                                                                     style = MaterialTheme.typography.bodyLarge,
-                                                                    maxLines = 1
+                                                                    maxLines = 1,
+                                                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                                                 )
                                                                 Text(
                                                                     "${device.ip}:${device.port}",
                                                                     style = MaterialTheme.typography.bodySmall,
-                                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                    maxLines = 1,
+                                                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                                                 )
                                                             }
                                                         }
@@ -1234,11 +1217,9 @@ fun AurelayApp(
                                 Toast.makeText(context, "请先选择一台接收端设备", Toast.LENGTH_LONG).show()
                                 return@Button
                             }
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                recordAudioPermissionLauncher?.launch(android.Manifest.permission.RECORD_AUDIO)
-                            } else {
-                                Toast.makeText(context, "音频采集需要 Android 10 及以上", Toast.LENGTH_LONG).show()
-                            }
+                            // 电脑放音只需麦克风，不再依赖 MediaProjection，
+                            // 因此也不再要求「Android 10 及以上」
+                            recordAudioPermissionLauncher?.launch(android.Manifest.permission.RECORD_AUDIO)
                         } else {
                             isServiceRunning = true
                             val intent = Intent(context, AudioRelayService::class.java)
@@ -1758,7 +1739,7 @@ fun AurelayApp(
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = DiagLog.appVersion(context),
+                                text = DiagLog.appVersionName(context),
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Medium,
                                 color = MaterialTheme.colorScheme.primary
@@ -1767,7 +1748,7 @@ fun AurelayApp(
                                 val clipboard =
                                     context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                                 clipboard?.setPrimaryClip(
-                                    ClipData.newPlainText("Aurelay 版本", DiagLog.appVersion(context))
+                                    ClipData.newPlainText("Aurelay 版本", DiagLog.appVersionName(context))
                                 )
                                 Toast.makeText(context, "版本号已复制", Toast.LENGTH_SHORT).show()
                             }) {
