@@ -29,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.text.font.FontWeight
@@ -86,18 +87,26 @@ class MainActivity : ComponentActivity() {
     private var clientIpState by mutableStateOf("")
     private var audioLevels by mutableStateOf(FloatArray(24) { 0f })
 
-    // 待推流的目标电脑 IP：刻意用「普通字段」而非 Compose 状态。
-    // 原因：列表项点击后若权限已授予，权限回调会几乎立即触发，
-    // 此时 Compose 状态（clientIp）可能还没重组完成，读到的仍是空值，
-    // 导致服务收到空的 EXTRA_TARGET_IP 而拒绝启动（表现为「点了没反应/一闪就崩」）。
-    // 普通字段是同步读写的，能彻底规避这个时序问题。
-    private var pendingCaptureIp: String = ""
+    // 采集服务回传的推流状态：广播接收器是 Activity 字段，访问不到 Composable
+    // 里的局部状态，因此先落到这三个 Activity 级字段，再由界面观察同步。
+    // seq 每次 +1，保证「同一状态重复到达」也能触发一次效应。
+    var captureStateSeq by mutableStateOf(0)
+    var captureStateValue by mutableStateOf("")
+    var captureStateReason by mutableStateOf("")
     private var pendingConnectionRequest by mutableStateOf<Pair<String, String>?>(null) // IP, Name
     
     companion object {
         const val ACTION_CONNECTION_REQUEST = "com.devindeed.aurelay.CONNECTION_REQUEST"
         const val ACTION_CONNECTION_RESPONSE = "com.devindeed.aurelay.CONNECTION_RESPONSE"
         const val EXTRA_APPROVED = "approved"
+
+        // 待推流的目标电脑 IP：刻意放在 companion object（普通字段，同步读写），
+        // 不用 Compose 状态。原因：列表项点击后若权限已授予，权限回调会几乎立即触发，
+        // 此时 Compose 状态（clientIp）可能还没重组完成，读到的仍是空值，
+        // 导致服务收到空的 EXTRA_TARGET_IP 而拒绝启动——表现为「首次点击没反应、
+        // 第二次才成功」。Activity 字段在顶层 Composable 里访问不到，
+        // 所以放 companion object，让界面与权限回调都能拿到同一个值。
+        var pendingCaptureIp: String = ""
 
         // 权限测试：一次批量申请的全部危险权限（8.2.3 A 组）
         val RUNTIME_PERMISSIONS = arrayOf(
@@ -202,25 +211,11 @@ class MainActivity : ComponentActivity() {
                     val state = intent.getStringExtra(AudioCaptureService.EXTRA_CAPTURE_STATE) ?: ""
                     val reason = intent.getStringExtra(AudioCaptureService.EXTRA_CAPTURE_REASON) ?: ""
                     Log.d("MainActivity", "推流状态回传：$state $reason")
-                    when (state) {
-                        "connected" -> {
-                            isServiceRunning = true
-                            connectingToIp = ""
-                        }
-                        "failed" -> {
-                            isServiceRunning = false
-                            connectingToIp = ""
-                            Toast.makeText(
-                                ctx ?: this@MainActivity,
-                                "连不上电脑：${reason.ifEmpty { "电脑端可能没开启接收" }}",
-                                Toast.LENGTH_LONG
-                            ).show()
-                        }
-                        "stopped" -> {
-                            isServiceRunning = false
-                            connectingToIp = ""
-                        }
-                    }
+                    // 广播接收器是 Activity 字段，访问不到 Composable 里的局部状态，
+                    // 因此写入 Activity 级事件字段，由界面观察并同步（seq 保证重复到达也触发）
+                    captureStateValue = state
+                    captureStateReason = reason
+                    captureStateSeq++
                 }
                 ACTION_CONNECTION_REQUEST -> {
                     val ip = intent.getStringExtra("client_ip") ?: ""
@@ -579,6 +574,34 @@ fun AurelayApp(
     var diagBusy by remember { mutableStateOf(false) }
     var connectingToIp by remember { mutableStateOf("") } // Track which device we're connecting to
 
+    // 观察采集服务回传的真实推流状态：连上才显示「正在广播」，连不上提示原因。
+    // 在此之前是 startForegroundService 之后无条件置 isServiceRunning = true，
+    // 导致电脑端根本没开监听时手机也谎报成功——用户完全无法判断真实状态。
+    val activity = LocalContext.current as? MainActivity
+    LaunchedEffect(activity?.captureStateSeq ?: 0) {
+        val state = activity?.captureStateValue ?: return@LaunchedEffect
+        when (state) {
+            "connected" -> {
+                isServiceRunning = true
+                connectingToIp = ""
+            }
+            "failed" -> {
+                isServiceRunning = false
+                connectingToIp = ""
+                val reason = activity?.captureStateReason ?: ""
+                Toast.makeText(
+                    context,
+                    "连不上电脑：${reason.ifEmpty { "电脑端可能没开启接收" }}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            "stopped" -> {
+                isServiceRunning = false
+                connectingToIp = ""
+            }
+        }
+    }
+
     // Only initialize media projection components when not in preview mode
     val isPreview = LocalInspectionMode.current
     
@@ -616,7 +639,7 @@ fun AurelayApp(
                         action = AudioCaptureService.ACTION_START
                         putExtra(
                             AudioCaptureService.EXTRA_TARGET_IP,
-                            pendingCaptureIp.ifEmpty { currentTargetIp }
+                            MainActivity.pendingCaptureIp.ifEmpty { currentTargetIp }
                         )
                         putExtra(AudioCaptureService.EXTRA_TARGET_PORT, 5000)
                         putExtra(AudioCaptureService.EXTRA_AUDIO_OUTPUT_MODE, currentOutputMode)
@@ -626,7 +649,7 @@ fun AurelayApp(
                     // startForegroundService 只是「请求」系统启动服务，真正有没有连上电脑
                     // 要等服务自己回调：连上了会发 CAPTURE_STATE(connected)，
                     // 连不上会发 failed——在此之前 UI 只显示「连接中」，不再谎报「正在广播」。
-                    connectingToIp = pendingCaptureIp.ifEmpty { currentTargetIp }
+                    connectingToIp = MainActivity.pendingCaptureIp.ifEmpty { currentTargetIp }
                 } catch (ex: Exception) {
                     // 启动失败要留下线索，否则只会看到「点了没反应」或「一闪就崩」
                     DiagLog.e(
@@ -1139,7 +1162,7 @@ fun AurelayApp(
                                                                 onClientIpSelected(device.ip)
                                                                 connectingToIp = device.ip
                                                                 // 同步写入普通字段，确保权限回调立即触发时也能拿到正确的 IP
-                                                                pendingCaptureIp = device.ip
+                                                                MainActivity.pendingCaptureIp = device.ip
                                                                 recordAudioPermissionLauncher?.launch(
                                                                     android.Manifest.permission.RECORD_AUDIO
                                                                 )
@@ -1277,7 +1300,7 @@ fun AurelayApp(
                             }
                             // 电脑放音只需麦克风，不再依赖 MediaProjection，
                             // 因此也不再要求「Android 10 及以上」
-                            pendingCaptureIp = clientIp
+                            MainActivity.pendingCaptureIp = clientIp
                             recordAudioPermissionLauncher?.launch(android.Manifest.permission.RECORD_AUDIO)
                         } else {
                             isServiceRunning = true
