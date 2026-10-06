@@ -352,7 +352,7 @@ class AudioRelayService : Service() {
                 .setContentTitle("Aurelay 声音中继")
                 .setContentText(displayText)
                 // 图标统一用 Aurelay 自己的启动图标；其余风格与采集端一致
-                .setSmallIcon(R.mipmap.ic_launcher)
+                .setSmallIcon(com.devindeed.aurelay.R.mipmap.ic_launcher)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)

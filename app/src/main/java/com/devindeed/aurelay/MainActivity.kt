@@ -906,7 +906,8 @@ fun AurelayApp(
                         if (isBroadcastMode && isServiceRunning) {
                             VolumeRingVisualizer(
                                 modifier = Modifier.size(120.dp),
-                                audioLevel = captureLevel,
+                                // captureLevel 是 Activity 字段，这里必须经 activity 实例取
+                                audioLevel = activity?.captureLevel ?: 0f,
                                 color = MaterialTheme.colorScheme.primary
                             )
                             Spacer(Modifier.height(12.dp))
