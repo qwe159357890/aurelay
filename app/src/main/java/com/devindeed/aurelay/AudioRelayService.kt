@@ -53,6 +53,9 @@ class AudioRelayService : Service() {
     private var useTls: Boolean = false // Default to plain TCP for easier testing (change to true for production TLS)
     private var audioTrack: AudioTrack? = null
 
+    // 当前一路客户端会话的 socket（用于「停止会话」时主动关闭，见 stopAudioSession）
+    @Volatile private var currentClientSocket: Socket? = null
+
     // 当前 AudioTrack 采用的采样率与声道数（流协商结果，用于判断是否需要重建）
     private var currentSampleRate: Int = 0
     private var currentOutChannels: Int = 0
@@ -230,6 +233,15 @@ class AudioRelayService : Service() {
      */
     private fun stopAudioSession() {
         DiagLog.i("服务", "收到停止指令：仅结束音频会话，服务与通知保持常驻")
+        // 先断开当前会话的客户端 socket：让接收循环走到退出分支，
+        // 顺便由 handleStream 的 finally 完成音轨 pause+flush。
+        // 不先断的话，接收线程会一直阻塞在往已暂停音轨里 write，会话结束不了。
+        try {
+            currentClientSocket?.close()
+        } catch (e: Exception) {
+            DiagLog.w("服务", "关闭客户端连接失败：${e.message}")
+        }
+        currentClientSocket = null
         // 会话级停止按禁令 #3：**只 pause + flush，绝不 release**——
         // release 过的音轨状态是 STATE_UNINITIALIZED，下次复用会在
         // AudioTrack.stop()/flush() 的 precondition 检查上抛 IllegalStateException。
@@ -543,6 +555,9 @@ class AudioRelayService : Service() {
         client.soTimeout = 100 // 100ms timeout prevents indefinite blocking
         client.tcpNoDelay = true // Disable Nagle's algorithm for lower latency
         client.receiveBufferSize = 4096 // Smaller buffer for lower latency
+        // 记下本次会话的 socket：用户点「停止」时要能主动关掉它，
+        // 否则接收线程会一直阻塞在往已暂停音轨里 write，会话结束不了。
+        currentClientSocket = client
         val peer = try { client.inetAddress.hostAddress ?: "" } catch (ex: Exception) { "" }
         Log.i("AudioRelay", "Client connected: $peer")
         DiagLog.i("连接", "电脑端已连接：$peer:${client.port}（本机端口 $AUDIO_PORT）")
@@ -567,6 +582,10 @@ class AudioRelayService : Service() {
             handleStream(client.getInputStream(), peer)
         } finally {
             try { client.close() } catch (ex: Exception) { /* 忽略关闭异常 */ }
+            // 会话自然结束时清引用，避免下次「停止」去关一个已被回收的 socket
+            if (currentClientSocket === client) {
+                currentClientSocket = null
+            }
         }
     }
 
