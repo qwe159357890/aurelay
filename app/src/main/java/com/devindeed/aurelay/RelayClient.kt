@@ -6,6 +6,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.toByteString
 import org.json.JSONObject
 import java.io.InputStream
 import java.io.PipedInputStream
@@ -187,7 +188,8 @@ class RelayClient {
     fun sendAudio(data: ByteArray, length: Int): Boolean {
         return try {
             val socket = webSocket ?: return false
-            socket.send(okio.ByteString.of(data, 0, length))
+            val chunk = data.copyOfRange(0, length.coerceAtMost(data.size))
+            socket.send(chunk.toByteString())
             true
         } catch (e: Exception) {
             DiagLog.e("中转", "发送音频数据失败", e)
