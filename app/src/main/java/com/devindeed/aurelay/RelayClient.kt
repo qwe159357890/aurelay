@@ -7,6 +7,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.io.IOException
 import java.io.InputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
@@ -19,13 +20,12 @@ import java.util.concurrent.TimeUnit
  * 因此改为**主动出站**连到中心服务器，由服务器把 PC 推来的音频字节原样转发过来。
  * 出站长连接一旦建立，入站限制、双卡选卡、运营商 IPv6 策略、CGNAT 全部不再影响链路。
  *
- * **传输方式：WebSocket，复用中心服务器的 15151 端口**（服务器只开放了这一个端口）。
- * 音频本身已经是 Opus 压缩后的字节，服务器不解包、不转码，只是原样转发。
+ * **传输方式：WebSocket，复用中心服务器的 15151 端口。**
+ * 之所以不另开裸 TCP 端口：服务器只开放了 15151，无法新开端口；
+ * 而 FastAPI / uvicorn 原生支持 WebSocket，正好可以在同一端口上承载长连接。
  *
- * 协议：
- * - 首帧（文本）：`{"type":"hello","device_id":"","token":"","role":"R"|"S"}`
- * - 控制帧（文本）：`ready` / `error` / `ping` ↔ `pong`
- * - 音频帧（二进制）：原样透传，服务器转发给同一设备的对端角色
+ * 帧约定：**文本帧 = 控制消息（hello / ready / error / ping / pong），
+ * 二进制帧 = 音频数据（原样透传的 AURL 字节，本身已是 Opus 压缩结果）**。
  *
  * 使用方式：调用 `start()` 后，通过 `audioInput()` 拿到一条连续的音频输入流，
  * 交给 AudioRelayService 现有的流解析逻辑（与局域网直连完全同一套代码）。
@@ -71,17 +71,11 @@ class RelayClient {
     // 监听器
     var listener: Listener? = null
 
-    // 中转服务器地址（形如 host:15151）
-    private var serverText: String = ""
-
-    // 完整的 WebSocket 地址
-    private var url: String = ""
-
-    // 设备标识与令牌
+    // 连接参数（来自 AppPrefs）
+    private var host: String = ""
+    private var port: Int = 15151
     private var deviceId: String = ""
     private var token: String = ""
-
-    // 角色
     private var role: Byte = RelayProtocol.ROLE_RECEIVER
 
     // 运行控制
@@ -97,7 +91,7 @@ class RelayClient {
     // 重连线程（避免并发重连）
     private var retryThread: Thread? = null
 
-    // 管道：把收到的音频数据转成一条 InputStream 供上层解析
+    // 管道：把收到的音频数据转成一条连续的 InputStream 供上层解析
     private var pipeOut: PipedOutputStream? = null
     private var pipeIn: PipedInputStream? = null
 
@@ -116,9 +110,11 @@ class RelayClient {
     fun start(context: Context, role: Byte, audioPort: Int) {
         if (running) return
         val app = context.applicationContext
-        serverText = AppPrefs.getString(app, AppPrefs.KEY_RELAY_SERVER, AppPrefs.DEFAULT_RELAY_SERVER)
-        val scheme = if (serverText.startsWith("ws://") || serverText.startsWith("wss://")) "" else "ws://"
-        url = "$scheme$serverText${AppPrefs.RELAY_PATH}"
+        val server = AppPrefs.getString(app, AppPrefs.KEY_RELAY_SERVER, AppPrefs.DEFAULT_RELAY_SERVER)
+        val cleaned = server.removePrefix("ws://").removePrefix("wss://")
+        val separator = cleaned.lastIndexOf(':')
+        host = if (separator > 0) cleaned.substring(0, separator) else cleaned
+        port = if (separator > 0) cleaned.substring(separator + 1).toIntOrNull() ?: 15151 else 15151
         deviceId = AddressReporter.getOrCreateDeviceId(app)
         token = AppPrefs.getString(app, AppPrefs.KEY_REPORT_TOKEN, AppPrefs.DEFAULT_REPORT_TOKEN)
         this.role = role
@@ -138,7 +134,7 @@ class RelayClient {
 
         pingThread = Thread({ pingLoop() }, "AurelayRelayPing").also { it.start() }
         connectOnce()
-        DiagLog.i("中转", "中转客户端启动：$url，角色=${role.toInt().toChar()}，本机端口=$audioPort")
+        DiagLog.i("中转", "中转客户端启动：$host:$port，角色=${role.toInt().toChar()}，本机端口=$audioPort")
     }
 
     /**
@@ -184,18 +180,27 @@ class RelayClient {
      * :param length: 有效长度
      * :return: true 表示写入成功
      */
-    @Suppress("DEPRECATION")
     fun sendAudio(data: ByteArray, length: Int): Boolean {
         return try {
             val socket = webSocket ?: return false
-            val chunk = data.copyOfRange(0, length.coerceAtMost(data.size))
-            val packet = okio.ByteString.of(chunk, 0, chunk.size)
-            socket.send(packet)
+            socket.send(okio.ByteString.of(*chunkOf(data, length)))
             true
         } catch (e: Exception) {
             DiagLog.e("中转", "发送音频数据失败", e)
             false
         }
+    }
+
+    /**
+     * 从源数组里截出有效的音频片段
+     *
+     * :param data: 源数据
+     * :param length: 有效长度
+     * :return: 截取后的字节数组
+     */
+    private fun chunkOf(data: ByteArray, length: Int): ByteArray {
+        val size = length.coerceAtMost(data.size)
+        return data.copyOfRange(0, size)
     }
 
     /**
@@ -221,6 +226,11 @@ class RelayClient {
                 socket.send(hello.toString())
             }
 
+            override fun onMessage(socket: WebSocket, text: String) {
+                lastAliveAt = System.currentTimeMillis()
+                handleControl(text)
+            }
+
             override fun onMessage(socket: WebSocket, bytes: okio.ByteString) {
                 lastAliveAt = System.currentTimeMillis()
                 try {
@@ -231,11 +241,6 @@ class RelayClient {
                 } catch (e: Exception) {
                     DiagLog.e("中转", "写入音频管道失败", e)
                 }
-            }
-
-            override fun onMessage(socket: WebSocket, text: String) {
-                lastAliveAt = System.currentTimeMillis()
-                handleControl(text)
             }
 
             override fun onFailure(socket: WebSocket, t: Throwable, response: Response?) {
@@ -286,37 +291,6 @@ class RelayClient {
     }
 
     /**
-     * 断线后按退避策略重连（1/2/4/8/16/30 秒）
-     *
-     * :return: 无返回值
-     */
-    private fun scheduleReconnect() {
-        if (!running) return
-        if (retryThread != null && retryThread!!.isAlive) return
-        retryThread = Thread({
-            var attempt = 0
-            while (running && webSocket == null) {
-                val delay =
-                    RelayProtocol.BACKOFF_MS[attempt.coerceAtMost(RelayProtocol.BACKOFF_MS.size - 1)]
-                attempt++
-                try {
-                    Thread.sleep(delay)
-                } catch (e: InterruptedException) {
-                    break
-                }
-                if (!running || webSocket != null) break
-                DiagLog.i("中转", "第 $attempt 次重连")
-                connectOnce()
-                try {
-                    Thread.sleep(3000)
-                } catch (e: InterruptedException) {
-                    break
-                }
-            }
-        }, "AurelayRelayRetry").also { it.start() }
-    }
-
-    /**
      * 心跳循环：每 30 秒发一次文本 ping
      *
      * :return: 无返回值
@@ -324,10 +298,10 @@ class RelayClient {
     private fun pingLoop() {
         while (running) {
             try {
-                Thread.sleep(RelayProtocol.PING_INTERVAL_MS)
-            } catch (e: InterruptedException) {
-                break
-            }
+                TimeUnit.MILLISECONDS.sleep(RelayProtocol.PING_INTERVAL_MS)
+        } catch (e: InterruptedException) {
+            break
+        }
             if (!running) break
             try {
                 webSocket?.send("{\"type\":\"ping\"}")
