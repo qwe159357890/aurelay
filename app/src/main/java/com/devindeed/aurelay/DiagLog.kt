@@ -362,6 +362,17 @@ object DiagLog {
         }
     }
 
+    // 只取版本名（不带括号与版本码），用于设置页「版本」行展示与一键复制
+    fun appVersionName(context: Context): String {
+        return try {
+            val app = context.applicationContext
+            val info = app.packageManager.getPackageInfo(app.packageName, 0)
+            info.versionName ?: "未知"
+        } catch (e: Exception) {
+            "未知"
+        }
+    }
+
     /**
      * 采集环境信息（机型、系统、安装包签名 SHA-1、音频状态）
      *

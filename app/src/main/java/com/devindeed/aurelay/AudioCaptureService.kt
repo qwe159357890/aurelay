@@ -258,7 +258,6 @@ class AudioCaptureService : Service() {
                 Log.e(TAG, "Error starting AudioRecord: ${e.message}")
                 stopSelf()
             }
-        }
 
         // Check for permission again if needed, though service should have it.
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
