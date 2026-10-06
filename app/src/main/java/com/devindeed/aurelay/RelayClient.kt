@@ -341,4 +341,36 @@ class RelayClient {
             DiagLog.e("中转", "通知状态变化失败", e)
         }
     }
+
+    /**
+     * 断线后按退避策略重连（1/2/4/8/16/30 秒）
+     *
+     * :return: 无返回值
+     */
+    private fun scheduleReconnect() {
+        if (!running) return
+        val existing = retryThread
+        if (existing != null && existing.isAlive) return
+        retryThread = Thread({
+            var attempt = 0
+            while (running && webSocket == null) {
+                val index = attempt.coerceAtMost(RelayProtocol.BACKOFF_MS.size - 1)
+                val delay = RelayProtocol.BACKOFF_MS[index]
+                attempt++
+                try {
+                    Thread.sleep(delay)
+                } catch (e: InterruptedException) {
+                    break
+                }
+                if (!running || webSocket != null) break
+                DiagLog.i("中转", "第 $attempt 次重连")
+                connectOnce()
+                try {
+                    Thread.sleep(3000)
+                } catch (e: InterruptedException) {
+                    break
+                }
+            }
+        }, "AurelayRelayRetry").also { it.start() }
+    }
 }
