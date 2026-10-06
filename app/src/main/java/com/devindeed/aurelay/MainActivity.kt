@@ -181,8 +181,9 @@ class MainActivity : ComponentActivity() {
                     Log.d("MainActivity", "Broadcast received: connected=$connected, ip=$ip")
                     
                     if (!connected) {
-                        // Connection rejected - show toast
-                        Toast.makeText(ctx, "接收端拒绝了本次连接", Toast.LENGTH_SHORT).show()
+                        // 断开连接不再弹「拒绝」提示：该功能（连接需要确认）已删除，
+                        // 而服务停止、对端断开也会走同一条广播，弹提示纯属误导
+                        Log.d("MainActivity", "连接已断开：ip=$ip")
                     }
                     
                     connectionState = connected
@@ -1214,8 +1215,11 @@ fun AurelayApp(
                              intent.action = AudioCaptureService.ACTION_STOP
                              context.startService(intent)
                         } else {
+                            // 必须走 ACTION_STOP_SERVICE：它会 stopSelf() 并返回 START_NOT_STICKY，
+                            // 而直接 stopService() 会让 START_STICKY 把服务再拉起来（表现为「点了停止还在响」）
                             val intent = Intent(context, AudioRelayService::class.java)
-                            context.stopService(intent)
+                            intent.action = AudioRelayService.ACTION_STOP_SERVICE
+                            context.startService(intent)
                         }
                     } else {
                         // START
@@ -1645,8 +1649,7 @@ fun AurelayApp(
                                     fontWeight = FontWeight.Medium
                                 )
                                 Text(
-                                    text = "没有声音等异常时打开开关，复现一次问题后点「上传日志」，日志会发到你的中心服务器。" +
-                                            "开关立即生效，不受「保存/取消」影响；关着开关也会记录关键事件（连接、音轨、首帧、汇总）。",
+                                    text = "出问题时打开开关，复现一次后点「上传日志」",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -1662,18 +1665,8 @@ fun AurelayApp(
                             )
                         }
 
-                        Spacer(Modifier.height(8.dp))
-
-                        Text(
-                            text = "App 版本：" + DiagLog.appVersion(context) +
-                                    "　日志上传地址：" +
-                                    DiagUploader.resolveUploadUrl(context).ifEmpty { "未配置（请先填写上报接口地址）" },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
                         if (diagResult.isNotEmpty()) {
-                            Spacer(Modifier.height(4.dp))
+                            Spacer(Modifier.height(6.dp))
                             Text(
                                 text = diagResult,
                                 style = MaterialTheme.typography.bodySmall,
@@ -1714,6 +1707,63 @@ fun AurelayApp(
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Text(if (diagBusy) "上传中…" else "上传日志")
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+
+                        // 清空本地日志：删掉内存缓冲与磁盘上已轮转的日志文件
+                        OutlinedButton(
+                            onClick = {
+                                DiagLog.clear(context)
+                                diagResult = "本地日志已清空"
+                                Toast.makeText(context, "本地日志已清空", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            )
+                        ) {
+                            Text("清空本地日志")
+                        }
+                    }
+
+                    HorizontalDivider()
+
+                    // 版本信息：排查问题时请一并提供，避免「说不清装的是哪一版」
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "版本",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "排查问题时请一并提供这个版本号",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = DiagLog.appVersion(context),
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            TextButton(onClick = {
+                                val clipboard =
+                                    context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                clipboard?.setPrimaryClip(
+                                    ClipData.newPlainText("Aurelay 版本", DiagLog.appVersion(context))
+                                )
+                                Toast.makeText(context, "版本号已复制", Toast.LENGTH_SHORT).show()
+                            }) {
+                                Text("复制")
                             }
                         }
                     }
