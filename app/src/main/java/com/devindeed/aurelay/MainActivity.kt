@@ -1724,8 +1724,11 @@ fun AurelayApp(
                                 contentColor = MaterialTheme.colorScheme.error
                             )
                         ) {
-                            Text("清空本地日志")
+                            Text("清空日志")
                         }
+
+                        Spacer(Modifier.height(8.dp))
+
                     }
 
                     HorizontalDivider()
