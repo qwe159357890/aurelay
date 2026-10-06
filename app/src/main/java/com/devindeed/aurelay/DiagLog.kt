@@ -77,6 +77,9 @@ object DiagLog {
      * :param context: 任意上下文（内部会取 applicationContext）
      * :return: 无返回值
      */
+    // 崩溃捕获是否已安装（避免重复安装）
+    private var crashHandlerInstalled = false
+
     fun install(context: Context) {
         val app = context.applicationContext
         enabled = try {
@@ -86,6 +89,28 @@ object DiagLog {
         }
         prepareFile(app)
         i("日志", "诊断日志器已安装：开关=${if (enabled) "开" else "关"}，文件=${file?.absolutePath ?: "不可用"}")
+        installCrashHandler()
+    }
+
+    // 安装全局崩溃捕获：把未捕获异常的堆栈写进诊断日志
+    private fun installCrashHandler() {
+        if (crashHandlerInstalled) return
+        crashHandlerInstalled = true
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                val sw = java.io.StringWriter()
+                throwable.printStackTrace(java.io.PrintWriter(sw))
+                e(
+                    "崩溃",
+                    "未捕获异常（线程=${thread.name}）：${throwable.javaClass.simpleName}：" +
+                        "${throwable.message}\n$sw"
+                )
+            } catch (_: Exception) {
+                // 写日志本身再出错也不能影响原有的崩溃处理
+            }
+            previous?.uncaughtException(thread, throwable)
+        }
     }
 
     /**

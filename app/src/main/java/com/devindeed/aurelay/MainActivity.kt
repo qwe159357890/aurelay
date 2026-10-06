@@ -570,14 +570,23 @@ fun AurelayApp(
             if (isGranted) {
                 // 电脑放音只需要麦克风：授权后直接拉起采集服务，不再申请屏幕投射，
                 // 系统因此不会再弹「要开始录制或投射内容吗？」
-                val intent = Intent(context, AudioCaptureService::class.java).apply {
-                    action = AudioCaptureService.ACTION_START
-                    putExtra(AudioCaptureService.EXTRA_TARGET_IP, clientIp)
-                    putExtra(AudioCaptureService.EXTRA_TARGET_PORT, 5000)
-                putExtra(AudioCaptureService.EXTRA_AUDIO_OUTPUT_MODE, audioOutputMode)
+                try {
+                    val intent = Intent(context, AudioCaptureService::class.java).apply {
+                        action = AudioCaptureService.ACTION_START
+                        putExtra(AudioCaptureService.EXTRA_TARGET_IP, clientIp)
+                        putExtra(AudioCaptureService.EXTRA_TARGET_PORT, 5000)
+                        putExtra(AudioCaptureService.EXTRA_AUDIO_OUTPUT_MODE, audioOutputMode)
+                    }
+                    ContextCompat.startForegroundService(context, intent)
+                    isServiceRunning = true
+                } catch (ex: Exception) {
+                    // 启动失败要留下线索，否则只会看到「点了没反应」或「一闪就崩」
+                    DiagLog.e(
+                        "采集",
+                        "启动采集服务失败：${ex.javaClass.simpleName}：${ex.message}"
+                    )
+                    Toast.makeText(context, "启动失败：${ex.message}", Toast.LENGTH_LONG).show()
                 }
-                ContextCompat.startForegroundService(context, intent)
-                isServiceRunning = true
             } else {
                 Toast.makeText(context, "电脑放音需要录音权限。", Toast.LENGTH_LONG).show()
             }

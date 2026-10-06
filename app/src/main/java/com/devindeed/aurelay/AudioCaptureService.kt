@@ -447,7 +447,7 @@ class AudioCaptureService : Service() {
     private fun createNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("音频采集")
-            .setContentText("正在采集并推送系统音频…")
+            .setContentText("正在采集麦克风声音并推送到电脑…")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
