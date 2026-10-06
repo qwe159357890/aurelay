@@ -114,6 +114,9 @@ dependencies {
     // AdMob / Google Mobile Ads
     implementation(libs.play.services.ads)
 
+    // OkHttp：音频中转走 WebSocket 复用 15151 端口（服务器只开放了这一个端口）
+    implementation(libs.okhttp)
+
 
 
 }

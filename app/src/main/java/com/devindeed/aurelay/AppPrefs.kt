@@ -41,7 +41,7 @@ object AppPrefs {
     // 允许服务器中转
     const val KEY_RELAY_ENABLED = "relay_enabled"
 
-    // 中转服务器地址（形如 039039.xyz:15152）
+    // 中转服务器地址（形如 039039.xyz:15151）
     const val KEY_RELAY_SERVER = "relay_server"
 
     // 历史电脑列表（JSON 数组，上限 10 条）
@@ -50,8 +50,11 @@ object AppPrefs {
     // 上次链路方式（服务重启后恢复现场用：lan / relay / 空）
     const val KEY_LAST_LINK_MODE = "last_link_mode"
 
-    // 默认中转服务器地址
-    const val DEFAULT_RELAY_SERVER = "039039.xyz:15152"
+    // 默认中转服务器地址（复用中心服务器的 15151 端口，不再另开端口）
+    const val DEFAULT_RELAY_SERVER = "039039.xyz:15151"
+
+    // 中转的 WebSocket 路径（与 center-server 的 aurelay.relay_path 一致）
+    const val RELAY_PATH = "/api/aurelay/relay"
 
     // 默认上报接口地址
     const val DEFAULT_REPORT_URL = "http://039039.xyz:15151/api/aurelay/report"

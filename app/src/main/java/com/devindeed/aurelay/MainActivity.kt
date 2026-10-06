@@ -1506,7 +1506,7 @@ fun AurelayApp(
                             value = tempRelayServer,
                             onValueChange = { tempRelayServer = it },
                             label = { Text("服务器地址") },
-                            placeholder = { Text("039039.xyz:15152") },
+                            placeholder = { Text("039039.xyz:15151") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )

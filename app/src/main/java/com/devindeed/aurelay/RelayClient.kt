@@ -1,25 +1,36 @@
 package com.devindeed.aurelay
 
 import android.content.Context
-import java.io.DataInputStream
-import java.io.IOException
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import org.json.JSONObject
 import java.io.InputStream
-import java.io.OutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
-import java.net.Socket
+import java.util.concurrent.TimeUnit
 
 /**
  * 中转客户端（手机放音在蜂窝网络下的链路）
  *
  * 蜂窝网络下手机没有公网入站能力（移动实测封入站），无法被动等待电脑连接，
- * 因此改为**主动出站长连接**到中转服务器，由服务器把 PC 推来的 AURL 字节原样转发过来。
+ * 因此改为**主动出站**连到中心服务器，由服务器把 PC 推来的音频字节原样转发过来。
  * 出站长连接一旦建立，入站限制、双卡选卡、运营商 IPv6 策略、CGNAT 全部不再影响链路。
+ *
+ * **传输方式：WebSocket，复用中心服务器的 15151 端口**（服务器只开放了这一个端口）。
+ * 音频本身已经是 Opus 压缩后的字节，服务器不解包、不转码，只是原样转发。
+ *
+ * 协议：
+ * - 首帧（文本）：`{"type":"hello","device_id":"","token":"","role":"R"|"S"}`
+ * - 控制帧（文本）：`ready` / `error` / `ping` ↔ `pong`
+ * - 音频帧（二进制）：原样透传，服务器转发给同一设备的对端角色
  *
  * 使用方式：调用 `start()` 后，通过 `audioInput()` 拿到一条连续的音频输入流，
  * 交给 AudioRelayService 现有的流解析逻辑（与局域网直连完全同一套代码）。
  *
- * 心跳 30 秒一次 PING；断线按 1/2/4/8/16/30 秒退避重连。
+ * 心跳 30 秒一次文本 ping；断线按 1/2/4/8/16/30 秒退避重连。
  */
 class RelayClient {
 
@@ -31,7 +42,7 @@ class RelayClient {
         IDLE,
         // 正在连接或重连
         CONNECTING,
-        // 已就绪（收到 READY，可收发数据）
+        // 已就绪（收到 ready，可收发数据）
         READY,
         // 出错（握手被拒或网络异常）
         ERROR
@@ -60,25 +71,31 @@ class RelayClient {
     // 监听器
     var listener: Listener? = null
 
-    // 连接参数
-    private var host: String = ""
-    private var port: Int = RelayProtocol.DEFAULT_PORT
+    // 中转服务器地址（形如 host:15151）
+    private var serverText: String = ""
+
+    // 完整的 WebSocket 地址
+    private var url: String = ""
+
+    // 设备标识与令牌
     private var deviceId: String = ""
     private var token: String = ""
+
+    // 角色
     private var role: Byte = RelayProtocol.ROLE_RECEIVER
-    private var localPort: Int = 0
 
     // 运行控制
     @Volatile private var running = false
 
-    // 当前 socket 与流
-    private var socket: Socket? = null
-    private var output: OutputStream? = null
-    private var input: DataInputStream? = null
+    // OkHttp 客户端与当前 WebSocket
+    private var httpClient: OkHttpClient? = null
+    private var webSocket: WebSocket? = null
 
-    // 读线程与心跳线程
-    private var readThread: Thread? = null
+    // 心跳线程
     private var pingThread: Thread? = null
+
+    // 重连线程（避免并发重连）
+    private var retryThread: Thread? = null
 
     // 管道：把收到的音频数据转成一条 InputStream 供上层解析
     private var pipeOut: PipedOutputStream? = null
@@ -92,21 +109,19 @@ class RelayClient {
      *
      * :param context: 任意上下文（用于读取中转服务器地址与令牌）
      * :param role: 角色，见 RelayProtocol 的 ROLE_*
-     * :param audioPort: 本机音频端口（接收方为 5000）
+     * :param audioPort: 本机音频端口（接收方为 5000，仅用于日志）
      * :return: 无返回值
      */
     @Synchronized
     fun start(context: Context, role: Byte, audioPort: Int) {
         if (running) return
         val app = context.applicationContext
-        val server = AppPrefs.getString(app, AppPrefs.KEY_RELAY_SERVER, AppPrefs.DEFAULT_RELAY_SERVER)
-        val parts = server.split(":")
-        host = parts.getOrNull(0) ?: AppPrefs.DEFAULT_RELAY_SERVER
-        port = parts.getOrNull(1)?.toIntOrNull() ?: RelayProtocol.DEFAULT_PORT
+        serverText = AppPrefs.getString(app, AppPrefs.KEY_RELAY_SERVER, AppPrefs.DEFAULT_RELAY_SERVER)
+        val scheme = if (serverText.startsWith("ws://") || serverText.startsWith("wss://")) "" else "ws://"
+        url = "$scheme$serverText${AppPrefs.RELAY_PATH}"
         deviceId = AddressReporter.getOrCreateDeviceId(app)
         token = AppPrefs.getString(app, AppPrefs.KEY_REPORT_TOKEN, AppPrefs.DEFAULT_REPORT_TOKEN)
         this.role = role
-        this.localPort = audioPort
         running = true
 
         if (pipeIn == null) {
@@ -116,9 +131,14 @@ class RelayClient {
             pipeIn = ins
         }
 
-        readThread = Thread({ runLoop() }, "AurelayRelayRead").also { it.start() }
+        httpClient = OkHttpClient.Builder()
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .build()
+
         pingThread = Thread({ pingLoop() }, "AurelayRelayPing").also { it.start() }
-        DiagLog.i("中转", "中转客户端启动：$host:$port，角色=${role.toInt().toChar()}")
+        connectOnce()
+        DiagLog.i("中转", "中转客户端启动：$url，角色=${role.toInt().toChar()}，本机端口=$audioPort")
     }
 
     /**
@@ -130,7 +150,7 @@ class RelayClient {
     fun stop() {
         if (!running) return
         running = false
-        closeSocket()
+        closeWebSocket()
         try {
             pipeOut?.close()
         } catch (e: Exception) {
@@ -138,6 +158,7 @@ class RelayClient {
         }
         pipeOut = null
         pipeIn = null
+        httpClient = null
         DiagLog.i("中转", "中转客户端已停止")
         notifyState(State.IDLE, "已停止")
     }
@@ -157,7 +178,7 @@ class RelayClient {
     fun lastAliveAt(): Long = lastAliveAt
 
     /**
-     * 主动发送音频数据（电脑放音经中转时使用；本次手机放音方向暂不使用）
+     * 主动发送音频数据（电脑放音经中转时使用）
      *
      * :param data: 待发送的数据
      * :param length: 有效长度
@@ -165,10 +186,8 @@ class RelayClient {
      */
     fun sendAudio(data: ByteArray, length: Int): Boolean {
         return try {
-            val frame = RelayProtocol.frame(RelayProtocol.TYPE_DATA, data.copyOfRange(0, length))
-            val out = output ?: return false
-            out.write(frame)
-            out.flush()
+            val socket = webSocket ?: return false
+            socket.send(okio.ByteString.of(data, 0, length))
             true
         } catch (e: Exception) {
             DiagLog.e("中转", "发送音频数据失败", e)
@@ -177,124 +196,125 @@ class RelayClient {
     }
 
     /**
-     * 连接与读取主循环（含退避重连）
+     * 建立一次 WebSocket 连接（失败由回调里的重连逻辑兜住）
      *
      * :return: 无返回值
      */
-    private fun runLoop() {
-        var attempt = 0
-        while (running) {
-            notifyState(State.CONNECTING, if (attempt == 0) "正在连接中转服务器" else "第 $attempt 次重连")
-            try {
-                val sock = Socket()
-                sock.connect(java.net.InetSocketAddress(host, port), 8_000)
-                sock.tcpNoDelay = true
-                socket = sock
-                output = sock.getOutputStream()
-                input = DataInputStream(sock.getInputStream())
-                DiagLog.i("中转", "已连上中转服务器 $host:$port")
+    private fun connectOnce() {
+        val client = httpClient ?: return
+        notifyState(State.CONNECTING, "正在连接中转服务器")
+        val request = Request.Builder().url(url).build()
+        client.newWebSocket(request, object : WebSocketListener() {
 
-                val hello = RelayProtocol.frame(
-                    RelayProtocol.TYPE_HELLO,
-                    RelayProtocol.helloPayload(role, deviceId, token, localPort)
-                )
-                output?.write(hello)
-                output?.flush()
+            override fun onOpen(socket: WebSocket, response: Response) {
+                webSocket = socket
                 lastAliveAt = System.currentTimeMillis()
-                attempt = 0
-                readFrames()
-            } catch (e: Exception) {
-                DiagLog.e("中转", "中转连接异常", e)
-                notifyState(State.ERROR, "连接异常：${e.message ?: "未知"}")
-            } finally {
-                closeSocket()
+                DiagLog.i("中转", "已连上中转服务器")
+                val hello = JSONObject()
+                hello.put("type", "hello")
+                hello.put("device_id", deviceId)
+                hello.put("token", token)
+                hello.put("role", if (role == RelayProtocol.ROLE_RECEIVER) "R" else "S")
+                socket.send(hello.toString())
             }
-            if (!running) break
-            val delay = RelayProtocol.BACKOFF_MS[attempt.coerceAtMost(RelayProtocol.BACKOFF_MS.size - 1)]
-            attempt++
-            try {
-                Thread.sleep(delay)
-            } catch (e: InterruptedException) {
-                break
-            }
-        }
-    }
 
-    /**
-     * 逐帧读取服务端消息（阻塞在 socket 读上）
-     *
-     * :return: 无返回值
-     */
-    private fun readFrames() {
-        val stream = input ?: return
-        while (running) {
-            val header = ByteArray(RelayProtocol.HEADER_SIZE)
-            try {
-                stream.readFully(header)
-            } catch (e: IOException) {
-                throw e
-            }
-            for (i in 0 until RelayProtocol.MAGIC_SIZE) {
-                if (header[i] != RelayProtocol.MAGIC[i]) {
-                    DiagLog.e("中转", "收到非法帧头，断开连接")
-                    return
-                }
-            }
-            val type = header[RelayProtocol.MAGIC_SIZE]
-            val length = RelayProtocol.readInt32(header, RelayProtocol.MAGIC_SIZE + 1)
-            if (length < 0 || length > 4 * 1024 * 1024) {
-                DiagLog.e("中转", "帧长度异常（$length），断开连接")
-                return
-            }
-            val payload = ByteArray(length)
-            if (length > 0) stream.readFully(payload)
-            lastAliveAt = System.currentTimeMillis()
-            handleFrame(type, payload)
-        }
-    }
-
-    /**
-     * 处理单帧消息
-     *
-     * :param type: 消息类型
-     * :param payload: 载荷
-     * :return: 无返回值
-     */
-    private fun handleFrame(type: Byte, payload: ByteArray) {
-        when (type) {
-            RelayProtocol.TYPE_READY -> {
-                notifyState(State.READY, "已接入中转服务器")
-                DiagLog.i("中转", "收到 READY，中转链路就绪")
-            }
-            RelayProtocol.TYPE_ERROR -> {
-                val code = RelayProtocol.errorCode(payload)
-                val message = RelayProtocol.errorMessage(payload)
-                notifyState(State.ERROR, "错误 $code：$message")
-                DiagLog.e("中转", "服务器返回错误：code=$code message=$message")
-            }
-            RelayProtocol.TYPE_PING -> {
-                sendFrame(RelayProtocol.TYPE_PONG)
-            }
-            RelayProtocol.TYPE_PONG -> {
-                // 心跳应答，仅刷新 lastAliveAt（已在 readFrames 中处理）
-            }
-            RelayProtocol.TYPE_DATA -> {
+            override fun onMessage(socket: WebSocket, bytes: okio.ByteString) {
+                lastAliveAt = System.currentTimeMillis()
                 try {
-                    pipeOut?.write(payload)
+                    val data = bytes.toByteArray()
+                    pipeOut?.write(data)
                     pipeOut?.flush()
-                    listener?.onAudioData(payload.size)
+                    listener?.onAudioData(data.size)
                 } catch (e: Exception) {
                     DiagLog.e("中转", "写入音频管道失败", e)
                 }
             }
-            else -> {
-                DiagLog.w("中转", "收到未知消息类型：$type")
+
+            override fun onMessage(socket: WebSocket, text: String) {
+                lastAliveAt = System.currentTimeMillis()
+                handleControl(text)
             }
+
+            override fun onFailure(socket: WebSocket, t: Throwable, response: Response?) {
+                DiagLog.e("中转", "中转连接异常：${t.message}", t)
+                notifyState(State.ERROR, "连接异常：${t.message ?: "未知"}")
+                webSocket = null
+                scheduleReconnect()
+            }
+
+            override fun onClosed(socket: WebSocket, code: Int, reason: String) {
+                DiagLog.i("中转", "中转连接已关闭：code=$code reason=$reason")
+                webSocket = null
+                scheduleReconnect()
+            }
+        })
+    }
+
+    /**
+     * 处理文本控制消息（ready / error / pong）
+     *
+     * :param text: 控制消息文本
+     * :return: 无返回值
+     */
+    private fun handleControl(text: String) {
+        try {
+            val obj = JSONObject(text)
+            when (obj.optString("type")) {
+                "ready" -> {
+                    notifyState(State.READY, "已接入中转服务器")
+                    DiagLog.i("中转", "收到 ready，中转链路就绪")
+                }
+                "error" -> {
+                    val code = obj.optInt("code", -1)
+                    val message = obj.optString("message", "")
+                    notifyState(State.ERROR, "错误 $code：$message")
+                    DiagLog.e("中转", "服务器返回错误：code=$code message=$message")
+                }
+                "pong" -> {
+                    // 心跳应答，lastAliveAt 已在入口刷新
+                }
+                else -> {
+                    DiagLog.d("中转", "忽略未知控制消息：$text")
+                }
+            }
+        } catch (e: Exception) {
+            DiagLog.w("中转", "解析控制消息失败：$text")
         }
     }
 
     /**
-     * 心跳循环：每 30 秒发一次 PING
+     * 断线后按退避策略重连（1/2/4/8/16/30 秒）
+     *
+     * :return: 无返回值
+     */
+    private fun scheduleReconnect() {
+        if (!running) return
+        if (retryThread != null && retryThread!!.isAlive) return
+        retryThread = Thread({
+            var attempt = 0
+            while (running && webSocket == null) {
+                val delay =
+                    RelayProtocol.BACKOFF_MS[attempt.coerceAtMost(RelayProtocol.BACKOFF_MS.size - 1)]
+                attempt++
+                try {
+                    Thread.sleep(delay)
+                } catch (e: InterruptedException) {
+                    break
+                }
+                if (!running || webSocket != null) break
+                DiagLog.i("中转", "第 $attempt 次重连")
+                connectOnce()
+                try {
+                    Thread.sleep(3000)
+                } catch (e: InterruptedException) {
+                    break
+                }
+            }
+        }, "AurelayRelayRetry").also { it.start() }
+    }
+
+    /**
+     * 心跳循环：每 30 秒发一次文本 ping
      *
      * :return: 无返回值
      */
@@ -306,50 +326,26 @@ class RelayClient {
                 break
             }
             if (!running) break
-            sendFrame(RelayProtocol.TYPE_PING)
+            try {
+                webSocket?.send("{\"type\":\"ping\"}")
+            } catch (e: Exception) {
+                DiagLog.w("中转", "发送心跳失败：${e.message}")
+            }
         }
     }
 
     /**
-     * 发送一个无载荷帧
-     *
-     * :param type: 消息类型
-     * :return: 无返回值
-     */
-    private fun sendFrame(type: Byte) {
-        try {
-            val out = output ?: return
-            out.write(RelayProtocol.frame(type))
-            out.flush()
-        } catch (e: Exception) {
-            DiagLog.w("中转", "发送帧失败（type=$type）：${e.message}")
-        }
-    }
-
-    /**
-     * 关闭当前 socket 与流
+     * 关闭当前 WebSocket
      *
      * :return: 无返回值
      */
-    private fun closeSocket() {
+    private fun closeWebSocket() {
         try {
-            input?.close()
+            webSocket?.cancel()
         } catch (e: Exception) {
             // 忽略关闭异常
         }
-        try {
-            output?.close()
-        } catch (e: Exception) {
-            // 忽略关闭异常
-        }
-        try {
-            socket?.close()
-        } catch (e: Exception) {
-            // 忽略关闭异常
-        }
-        input = null
-        output = null
-        socket = null
+        webSocket = null
     }
 
     /**

@@ -18,6 +18,7 @@ playServicesAds = "24.8.0"
 preferenceKtx = "1.2.1"
 lifecycleRuntimeCompose = "2.8.7"
 kotlinxCoroutinesAndroid = "1.7.3"
+okhttp = "4.12.0"
 
 [libraries]
 androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
@@ -46,6 +47,7 @@ androidx-compose-material3 = { group = "androidx.compose.material3", name = "mat
 material = { module = "com.google.android.material:material", version.ref = "material" }
 androidx-media = { group = "androidx.media", name = "media", version.ref = "media" }
 play-services-ads = { module = "com.google.android.gms:play-services-ads", version.ref = "playServicesAds" }
+okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

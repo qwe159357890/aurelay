@@ -39,7 +39,7 @@ object RelayProtocol {
     const val ROLE_SENDER: Byte = 0x53 // 'S'
 
     // 默认中转端口
-    const val DEFAULT_PORT = 15152
+    const val DEFAULT_PORT = 15151
 
     // 心跳间隔（毫秒）
     const val PING_INTERVAL_MS = 30_000L
