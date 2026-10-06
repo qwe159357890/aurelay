@@ -363,9 +363,21 @@ class AudioCaptureService : Service() {
                 var bytesWritten = 0L
                 var lastLogTime = System.currentTimeMillis()
 
+                var batchPeak = 0
                 while (isActive && isStreaming && clientSocket?.isConnected == true) {
                     val read = audioRecord?.read(buffer, 0, bufferSize) ?: 0
                     if (read > 0) {
+                        // 统计本批采样峰值：用来判定「麦克风到底有没有采到声音」。
+                        // 电脑端解码后 RMS=0，必须先分清是采集静音还是编解码静音。
+                        var p = 0
+                        while (p + 1 < read) {
+                            val raw = ((buffer[p + 1].toInt() and 0xFF) shl 8) or
+                                (buffer[p].toInt() and 0xFF)
+                            val signed = if (raw >= 32768) raw - 65536 else raw
+                            val abs = if (signed < 0) -signed else signed
+                            if (abs > batchPeak) batchPeak = abs
+                            p += 2
+                        }
                         try {
                             // Also play locally if both_devices mode
                             if (audioOutputMode == "both_devices" && audioTrack != null) {
@@ -382,14 +394,13 @@ class AudioCaptureService : Service() {
                                 while (accumulator.size() >= OpusEncoder.FRAME_BYTES) {
                                     val chunk = accumulator.toByteArray()
                                     System.arraycopy(chunk, 0, pending, 0, OpusEncoder.FRAME_BYTES)
+                                    // ⚠️ 原写法先 reset() 再判断 size()>0，条件恒为 false，
+                                    //    导致每批静默丢掉超出一帧的字节（表现为声音断续）。
+                                    //    正确做法：先算余数，reset 后再把尾部写回。
+                                    val remain = chunk.size - OpusEncoder.FRAME_BYTES
                                     accumulator.reset()
-                                    if (accumulator.size() > 0) {
-                                        // 把多余部分写回（正常情况下 read 会小于帧长，不会触发）
-                                        accumulator.write(
-                                            chunk,
-                                            OpusEncoder.FRAME_BYTES,
-                                            chunk.size - OpusEncoder.FRAME_BYTES
-                                        )
+                                    if (remain > 0) {
+                                        accumulator.write(chunk, OpusEncoder.FRAME_BYTES, remain)
                                     }
                                     val packet = enc.encode(pending, OpusEncoder.FRAME_BYTES)
                                     if (packet != null && packet.isNotEmpty()) {
@@ -403,6 +414,14 @@ class AudioCaptureService : Service() {
                             val now = System.currentTimeMillis()
                             if (now - lastLogTime > 5000) {
                                 Log.d(TAG, "Streamed ${bytesWritten / 1024} KB so far")
+                                // 峰值是关键判据：0 表示麦克风采到的就是静音；
+                                // 明显大于 0 却仍听不到，则问题在编码/传输/电脑播放侧
+                                DiagLog.i(
+                                    "采集",
+                                    "已推送 ${bytesWritten / 1024} KB，" +
+                                        "近 5 秒采样峰值=$batchPeak（0＝麦克风采到的是静音）"
+                                )
+                                batchPeak = 0
                                 DiagLog.d("推流", "已推送 ${bytesWritten / 1024} KB")
                                 lastLogTime = now
                             }
