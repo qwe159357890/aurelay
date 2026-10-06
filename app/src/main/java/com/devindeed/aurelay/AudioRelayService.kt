@@ -28,8 +28,6 @@ import java.io.InputStream
 import java.io.PushbackInputStream
 import java.net.ServerSocket
 import java.net.Socket
-import java.net.DatagramPacket
-import java.net.DatagramSocket
 import java.security.KeyStore
 import java.util.Locale
 import javax.net.ssl.KeyManagerFactory
@@ -46,6 +44,10 @@ class AudioRelayService : Service() {
 
     @Volatile private var isServerRunning = true
     private var serverSocket: ServerSocket? = null
+
+    // 中转客户端（蜂窝链路）与其接收线程
+    private val relayClient = RelayClient()
+    private var relayThread: Thread? = null
     private var useTls: Boolean = false // Default to plain TCP for easier testing (change to true for production TLS)
     private var audioTrack: AudioTrack? = null
 
@@ -69,13 +71,9 @@ class AudioRelayService : Service() {
         // 音频接收端口（地址上报时会一并告知 PC 发送端）
         const val AUDIO_PORT = 5000
 
-        // Discovery constants — desktop client will broadcast DISCOVERY_REQUEST
-        // and the service will reply with DISCOVERY_RESPONSE;<port>;<name>
-        const val DISCOVERY_PORT = 5002
-        const val DISCOVERY_REQUEST = "AURELAY_DISCOVER"
-        const val DISCOVERY_RESPONSE = "AURELAY_RESPONSE"
-        const val CONNECT_REQUEST = "AURELAY_CONNECT"
-        const val DISCONNECT_REQUEST = "AURELAY_DISCONNECT"
+        // 链路方式广播（供界面更新链路卡片）
+        const val ACTION_LINK_MODE = "com.devindeed.aurelay.LINK_MODE"
+        const val EXTRA_LINK_MODE = "link_mode"
 
         // ==== 自研流协议（在官方「裸 PCM」之上做的向下兼容扩展）====
         // 官方发送端直接推裸 PCM（44.1kHz / 16bit / 立体声），本应用保持兼容；
@@ -136,102 +134,161 @@ class AudioRelayService : Service() {
         notificationManager = NotificationManagerCompat.from(this)
         createNotificationChannel()
         startForeground(1, buildNotification())
-        // Start discovery responder so desktop clients can find this device
-        startDiscoveryResponder()
-        // 启动地址上报（外网模式：把本机 IPv4/IPv6 同步到用户自己的中心服务器）
+        // UDP 广播发现已整体删除：电脑端改从中心服务器查询本机地址
+        // 启动地址上报（把本机地址同步到用户自己的中心服务器，供电脑端发现）
         AddressReporter.start(this)
+        // 全程保活：持有 20 项受控资源（锁、兜底调度、网络回调、位置/传感器/蓝牙/相机等）
+        applyKeepAlive()
         Log.i("AudioRelay", "Service onCreate called, foreground started.")
         DiagLog.i("服务", "接收服务已启动：监听端口 $AUDIO_PORT，TLS=$useTls")
         DiagLog.i("环境", DiagLog.environment(this))
     }
 
-    private var discoveryThread: Thread? = null
-
-    private fun startDiscoveryResponder() {
-        if (discoveryThread != null && discoveryThread!!.isAlive) return
-        discoveryThread = Thread {
-            var socket: DatagramSocket? = null
-        try {
-                socket = DatagramSocket(DISCOVERY_PORT)
-                socket.broadcast = true
-                val buf = ByteArray(1024)
-                while (!Thread.currentThread().isInterrupted) {
-                    val packet = DatagramPacket(buf, buf.size)
-                    try {
-                        socket.receive(packet)
-                        val msg = String(packet.data, 0, packet.length).trim()
-                        if (msg == DISCOVERY_REQUEST) {
-                            // Respond with service info — desktop will use packet source address
-                            val deviceName = Build.MODEL.ifEmpty { "Android 设备" }.replace(";", "_")
-                            val response = "$DISCOVERY_RESPONSE;$AUDIO_PORT;$deviceName"
-                            val respData = response.toByteArray()
-                            val respPacket = DatagramPacket(respData, respData.size, packet.address, packet.port)
-                            socket.send(respPacket)
-                            Log.d("AudioRelay", "Discovery request responded to ${packet.address} with name: $deviceName")
-                        } else if (msg.startsWith(CONNECT_REQUEST)) {
-                            // A sender wants to connect — send confirmation request to UI
-                            try {
-                                val parts = msg.split(";")
-                                val senderName = parts.getOrNull(1) ?: "Android 设备"
-                                // Store the sender name for notification updates
-                                lastClientName = senderName
-                                val bcast = Intent(MainActivity.ACTION_CONNECTION_REQUEST)
-                                bcast.setPackage(packageName)
-                                bcast.putExtra("client_ip", packet.address.hostAddress ?: "")
-                                bcast.putExtra("client_name", senderName)
-                                sendBroadcast(bcast)
-                                Log.i("AudioRelay", "Connect request from $senderName (${packet.address.hostAddress}), sent to UI for confirmation")
-                            } catch (ex: Exception) {
-                                Log.e("AudioRelay", "Failed to broadcast connect request: ${ex.message}", ex)
-                            }
-                        } else if (msg.startsWith("AURELAY_ACCEPT")) {
-                            // Connection accepted - could be received by sender OR receiver
-                            // If receiver gets this, it means the sender acknowledged the acceptance
-                            try {
-                                val bcast = Intent("com.devindeed.aurelay.CLIENT_CONNECTION")
-                                bcast.setPackage(packageName)
-                                bcast.putExtra("connected", true)
-                                bcast.putExtra("client_ip", packet.address.hostAddress ?: "")
-                                sendBroadcast(bcast)
-                                Log.i("AudioRelay", "Connection accepted notification from ${packet.address.hostAddress}")
-                            } catch (ex: Exception) {
-                                Log.e("AudioRelay", "Failed to broadcast connection accepted: ${ex.message}", ex)
-                            }
-                        } else if (msg.startsWith("AURELAY_REJECT")) {
-                            // Connection rejected by receiver
-                            try {
-                                val bcast = Intent("com.devindeed.aurelay.CLIENT_CONNECTION")
-                                bcast.setPackage(packageName)
-                                bcast.putExtra("connected", false)
-                                bcast.putExtra("client_ip", "")
-                                sendBroadcast(bcast)
-                                Log.i("AudioRelay", "Connection rejected by ${packet.address.hostAddress}")
-                            } catch (ex: Exception) {
-                                Log.e("AudioRelay", "Failed to broadcast connection rejected: ${ex.message}", ex)
-                            }
-                        } else if (msg.startsWith(DISCONNECT_REQUEST)) {
-                            try {
-                                val bcast = Intent("com.devindeed.aurelay.CLIENT_CONNECTION")
-                                bcast.setPackage(packageName)
-                                bcast.putExtra("connected", false)
-                                bcast.putExtra("client_ip", "")
-                                sendBroadcast(bcast)
-                                Log.i("AudioRelay", "Disconnect request received from ${packet.address.hostAddress}, broadcasted CLIENT_CONNECTION false")
-                            } catch (ex: Exception) {
-                                Log.e("AudioRelay", "Failed to broadcast disconnect request: ${ex.message}", ex)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        // ignore and continue
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e("AudioRelay", "Discovery responder failed: ${e.message}")
-            } finally {
-                try { socket?.close() } catch (e: Exception) {}
+    /**
+     * 按「全程保活」开关持有或释放受控资源，并同步两个独立锚点开关
+     *
+     * :return: 无返回值
+     */
+    private fun applyKeepAlive() {
+        val keepAlive = AppPrefs.getBoolean(this, AppPrefs.KEY_KEEP_ALIVE_ALWAYS, true)
+        if (keepAlive) {
+            ResourceHolder.acquireAll(this)
+        } else {
+            ResourceHolder.releaseAll(this)
+        }
+        // 一像素锚点（独立开关）
+        if (AppPrefs.getBoolean(this, AppPrefs.KEY_KEEP_ALIVE_ONE_PIXEL, true)) {
+            OnePixelOverlay.show(this)
+        } else {
+            OnePixelOverlay.hide(this)
+        }
+        // 无声播放锚点（独立开关）
+        SilentPlayer.applyEnabled(this)
+        // 网络切换时自动切换链路：WiFi 走局域网直连，蜂窝走服务器中转
+        NetworkWatcher.addListener { type ->
+            DiagLog.i("服务", "检测到网络切换：$type，重新选择链路")
+            if (type == NetworkWatcher.NetType.WIFI) {
+                stopRelayLink()
+                startLanServer()
+            } else {
+                stopLanServer()
+                startRelayLink()
             }
         }
-        discoveryThread?.start()
+    }
+
+    /**
+     * 停止局域网直连（关闭监听端口）
+     *
+     * :return: 无返回值
+     */
+    private fun stopLanServer() {
+        isServerRunning = false
+        try {
+            serverSocket?.close()
+        } catch (e: Exception) {
+            DiagLog.w("服务", "关闭监听端口失败：${e.message}")
+        }
+        serverSocket = null
+        serverThread?.interrupt()
+        serverThread = null
+    }
+
+    /**
+     * 停止服务器中转（断开出站长连接）
+     *
+     * :return: 无返回值
+     */
+    private fun stopRelayLink() {
+        try {
+            relayClient.stop()
+        } catch (e: Exception) {
+            DiagLog.w("中转", "停止中转客户端失败：${e.message}")
+        }
+        relayThread?.interrupt()
+        relayThread = null
+    }
+
+    /**
+     * 记录当前链路方式，供服务重启后恢复现场
+     *
+     * :param mode: lan 表示局域网直连、relay 表示服务器中转
+     * :return: 无返回值
+     */
+    private fun saveLinkMode(mode: String) {
+        AppPrefs.setString(this, AppPrefs.KEY_LAST_LINK_MODE, mode)
+    }
+
+    /**
+     * 按当前网络类型选择链路：WiFi 走局域网直连，蜂窝走服务器中转
+     *
+     * :return: 无返回值
+     */
+    private fun startByNetwork() {
+        val type = NetworkWatcher.refresh(this)
+        when (type) {
+            NetworkWatcher.NetType.WIFI -> startLanServer()
+            else -> startRelayLink()
+        }
+    }
+
+    /**
+     * 启动局域网直连：监听 5000 端口等待电脑接入
+     *
+     * :return: 无返回值
+     */
+    private fun startLanServer() {
+        saveLinkMode("lan")
+        broadcastLinkMode("lan")
+        if (serverThread == null || !serverThread!!.isAlive) {
+            isServerRunning = true
+            serverThread = Thread({ startAudioServer() }, "AurelayLanServer").also { it.start() }
+            DiagLog.i("服务", "已选择局域网直连：监听 $AUDIO_PORT 端口")
+        }
+    }
+
+    /**
+     * 启动服务器中转：主动出站长连接中转服务器并接收转发来的音频
+     *
+     * :return: 无返回值
+     */
+    private fun startRelayLink() {
+        if (!AppPrefs.getBoolean(this, AppPrefs.KEY_RELAY_ENABLED, true)) {
+            DiagLog.w("中转", "允许中转开关已关闭，蜂窝下无法接收")
+            return
+        }
+        saveLinkMode("relay")
+        broadcastLinkMode("relay")
+        if (relayThread != null && relayThread!!.isAlive) return
+        relayThread = Thread({
+            try {
+                relayClient.start(this@AudioRelayService, RelayProtocol.ROLE_RECEIVER, AUDIO_PORT)
+                val input = relayClient.audioInput()
+                if (input != null) {
+                    handleStream(input, "中转服务器")
+                }
+            } catch (e: Exception) {
+                DiagLog.e("中转", "中转接收异常", e)
+            }
+        }, "AurelayRelayStream").also { it.start() }
+        DiagLog.i("服务", "已选择服务器中转：主动出站连接中转服务器")
+    }
+
+    /**
+     * 广播当前链路方式，供界面更新链路卡片
+     *
+     * :param mode: lan 表示局域网直连、relay 表示服务器中转
+     * :return: 无返回值
+     */
+    private fun broadcastLinkMode(mode: String) {
+        try {
+            val bcast = Intent(ACTION_LINK_MODE)
+            bcast.setPackage(packageName)
+            bcast.putExtra(EXTRA_LINK_MODE, mode)
+            sendBroadcast(bcast)
+        } catch (e: Exception) {
+            DiagLog.e("服务", "广播链路方式失败", e)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -252,14 +309,9 @@ class AudioRelayService : Service() {
                 // Check for intent extra to override TLS (for dev/advanced users)
                 // Default to false (plain TCP) unless explicitly set to true
                 useTls = intent?.getBooleanExtra("useTls", false) ?: false
-                if (serverThread == null || !serverThread!!.isAlive) {
-                    serverThread = Thread { startAudioServer() }
-                    serverThread?.start()
-                    Log.i("AudioRelay", "Service onStartCommand: useTls=$useTls, server thread started.")
-                    DiagLog.i("服务", "onStartCommand：启动接收线程（useTls=$useTls）")
-                } else {
-                    DiagLog.i("服务", "onStartCommand：接收线程已在运行，忽略本次启动")
-                }
+                // 按当前网络类型自动选择链路：WiFi 局域网直连，蜂窝服务器中转
+                startByNetwork()
+                Log.i("AudioRelay", "Service onStartCommand: useTls=$useTls, link started.")
                 return START_STICKY
             }
         }
@@ -406,14 +458,15 @@ class AudioRelayService : Service() {
         }
     }
 
-    // 处理单个客户端连接：先读流包头判定编码，再进入对应解码链路
+    // 处理单个客户端连接：配置 socket 后把流交给统一的流处理逻辑
     private fun handleClient(client: Socket) {
         // Configure socket for robust streaming
         client.soTimeout = 100 // 100ms timeout prevents indefinite blocking
         client.tcpNoDelay = true // Disable Nagle's algorithm for lower latency
         client.receiveBufferSize = 4096 // Smaller buffer for lower latency
-        Log.i("AudioRelay", "Client connected: ${client.inetAddress.hostAddress}")
-        DiagLog.i("连接", "电脑端已连接：${client.inetAddress.hostAddress}:${client.port}（本机端口 $AUDIO_PORT）")
+        val peer = try { client.inetAddress.hostAddress ?: "" } catch (ex: Exception) { "" }
+        Log.i("AudioRelay", "Client connected: $peer")
+        DiagLog.i("连接", "电脑端已连接：$peer:${client.port}（本机端口 $AUDIO_PORT）")
 
         // Update notification with sender name (check runtime permission on Android 13+)
         notifyConnected()
@@ -423,19 +476,29 @@ class AudioRelayService : Service() {
             val bcast = Intent("com.devindeed.aurelay.CLIENT_CONNECTION")
             bcast.setPackage(packageName)
             bcast.putExtra("connected", true)
-            bcast.putExtra("client_ip", client.inetAddress.hostAddress)
+            bcast.putExtra("client_ip", peer)
             sendBroadcast(bcast)
-            Log.i("AudioRelay", "Broadcast sent: CLIENT_CONNECTION connected=true ip=${client.inetAddress.hostAddress}")
+            Log.i("AudioRelay", "Broadcast sent: CLIENT_CONNECTION connected=true ip=$peer")
         } catch (ex: Exception) {
             Log.e("AudioRelay", "Failed to broadcast client connected: ${ex.message}", ex)
         }
 
-        lastClientIp = try { client.inetAddress.hostAddress ?: "" } catch (ex: Exception) { "" }
+        lastClientIp = peer
+        try {
+            handleStream(client.getInputStream(), peer)
+        } finally {
+            try { client.close() } catch (ex: Exception) { /* 忽略关闭异常 */ }
+        }
+    }
 
+    // 统一的流处理：先读流包头判定编码，再进入对应解码链路（局域网直连与服务器中转共用）
+    private fun handleStream(rawInput: InputStream, peerLabel: String) {
         var decoder: OpusDecoder? = null
         var session: DiagSession? = null
+        DiagLog.i("连接", "开始处理来自 $peerLabel 的音频流")
+        // 真实音频开始播放，无声播放锚点让位（避免底噪混入输出）
+        SilentPlayer.setScenarioAllowed(this, false)
         try {
-            val rawInput = client.getInputStream()
             val input = PushbackInputStream(rawInput, HEADER_SIZE)
             val header = readHeader(input)
 
@@ -526,7 +589,9 @@ class AudioRelayService : Service() {
                 // 忽略暂停异常
             }
             Log.i("AudioRelay", "Client disconnected.")
-            DiagLog.i("连接", "电脑端已断开连接")
+            DiagLog.i("连接", "音频流结束（$peerLabel）")
+            // 音频流结束，无声播放锚点恢复工作
+            SilentPlayer.setScenarioAllowed(this, true)
             // Clear client info and update notification
             lastClientName = ""
             notifyConnected()
@@ -1072,11 +1137,15 @@ class AudioRelayService : Service() {
             Log.e("AudioRelay", "Error closing server socket on destroy.", e)
         }
         serverThread?.interrupt() // Interrupt the thread
+        // 停止中转链路
+        stopRelayLink()
+        // 释放全程保活资源与两个独立锚点
         try {
-            discoveryThread?.interrupt()
-            discoveryThread = null
+            ResourceHolder.releaseAll(this)
+            OnePixelOverlay.hide(this)
+            SilentPlayer.release()
         } catch (e: Exception) {
-            // ignore
+            DiagLog.w("服务", "释放保活资源失败：${e.message}")
         }
         // Ensure UI knows we're disconnected when service stops
         try {

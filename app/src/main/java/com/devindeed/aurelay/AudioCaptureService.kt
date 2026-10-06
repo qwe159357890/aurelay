@@ -198,7 +198,7 @@ class AudioCaptureService : Service() {
 
             val audioFormat = AudioFormat.Builder()
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setSampleRate(44100)  // Match receiver's sample rate
+                .setSampleRate(48000)  // 与 Opus 编码规格一致（48kHz）
                 .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
                 .build()
 
@@ -281,47 +281,97 @@ class AudioCaptureService : Service() {
         }
     }
 
+    // 主动连上目标电脑后按 AURL + Opus 推流（8.8.1）
     private fun connectAndStream() {
+        // 采集期间无声播放锚点必须让位，否则会被麦克风采进去形成回声
+        SilentPlayer.setScenarioAllowed(this, false)
+        DiagLog.install(this)
         serviceScope.launch {
+            var encoder: OpusEncoder? = null
             try {
                 // First, establish connection
                 Log.d(TAG, "Connecting to receiver at $targetIp:$targetPort")
                 clientSocket = Socket(targetIp, targetPort)
                 clientSocket?.tcpNoDelay = true // Disable Nagle's algorithm for low latency
                 Log.d(TAG, "Connected to receiver successfully")
-                
-                // Then start streaming with smaller buffer for lower latency
-                val bufferSize = 1024 * 2  // Reduced from 4KB to 2KB for lower latency
-                val buffer = ByteArray(bufferSize)
+
                 val outputStream = clientSocket?.getOutputStream()
-                
+
                 if (outputStream == null) {
                     Log.e(TAG, "Output stream is null")
                     stopSelf()
                     return@launch
                 }
-                
+
+                // 优先用 Opus 编码（裸 PCM 蜂窝下 691MB/小时，Opus 约 57MB/小时）
+                val candidate = OpusEncoder()
+                if (candidate.start()) {
+                    encoder = candidate
+                } else {
+                    candidate.stop()
+                    Log.w(TAG, "Opus encoder unavailable, fallback to raw PCM")
+                    DiagLog.w("编码", "设备无 Opus 编码器，本次回退裸 PCM 推流")
+                }
+                val codec = if (encoder != null) 1 else 0
+
+                // 发送 8 字节 AURL 包头：魔数 + 版本 + 编码 + 声道 + 采样率代码
+                val header = byteArrayOf(
+                    0x41, 0x55, 0x52, 0x4C, // "AURL"
+                    1, codec.toByte(), 2, 1
+                )
+                outputStream.write(header)
+                outputStream.flush()
+                DiagLog.i("协议", "已发送 AURL 包头：编码=${if (codec == 1) "Opus" else "裸PCM"} 声道=2 采样率=48000")
+
+                // 采样与编码缓冲
+                val bufferSize = 1024 * 4
+                val buffer = ByteArray(bufferSize)
+                val accumulator = java.io.ByteArrayOutputStream(OpusEncoder.FRAME_BYTES * 2)
                 Log.d(TAG, "Starting audio streaming...")
                 var bytesWritten = 0L
                 var lastLogTime = System.currentTimeMillis()
-                
+
                 while (isActive && isStreaming && clientSocket?.isConnected == true) {
                     val read = audioRecord?.read(buffer, 0, bufferSize) ?: 0
                     if (read > 0) {
                         try {
-                            // Stream to remote device (removed flush() to reduce jitter)
-                            outputStream.write(buffer, 0, read)
-                            bytesWritten += read
-                            
                             // Also play locally if both_devices mode
                             if (audioOutputMode == "both_devices" && audioTrack != null) {
                                 audioTrack?.write(buffer, 0, read)
                             }
-                            
+                            val enc = encoder
+                            if (enc == null) {
+                                // 裸 PCM 回退：直接写原始采样
+                                outputStream.write(buffer, 0, read)
+                                bytesWritten += read
+                            } else {
+                                accumulator.write(buffer, 0, read)
+                                val pending = ByteArray(OpusEncoder.FRAME_BYTES)
+                                while (accumulator.size() >= OpusEncoder.FRAME_BYTES) {
+                                    val chunk = accumulator.toByteArray()
+                                    System.arraycopy(chunk, 0, pending, 0, OpusEncoder.FRAME_BYTES)
+                                    accumulator.reset()
+                                    if (accumulator.size() > 0) {
+                                        // 把多余部分写回（正常情况下 read 会小于帧长，不会触发）
+                                        accumulator.write(
+                                            chunk,
+                                            OpusEncoder.FRAME_BYTES,
+                                            chunk.size - OpusEncoder.FRAME_BYTES
+                                        )
+                                    }
+                                    val packet = enc.encode(pending, OpusEncoder.FRAME_BYTES)
+                                    if (packet != null && packet.isNotEmpty()) {
+                                        writeFrame(outputStream, packet)
+                                        bytesWritten += packet.size
+                                    }
+                                }
+                            }
+
                             // Log progress every 5 seconds
                             val now = System.currentTimeMillis()
                             if (now - lastLogTime > 5000) {
                                 Log.d(TAG, "Streamed ${bytesWritten / 1024} KB so far")
+                                DiagLog.d("推流", "已推送 ${bytesWritten / 1024} KB")
                                 lastLogTime = now
                             }
                         } catch (e: IOException) {
@@ -333,17 +383,31 @@ class AudioCaptureService : Service() {
                         break
                     }
                 }
-                
+
                 Log.d(TAG, "Audio streaming stopped. Total bytes: $bytesWritten")
-                
+                DiagLog.i("推流", "推流结束：共 ${bytesWritten / 1024} KB")
+
             } catch (e: IOException) {
                 Log.e(TAG, "Connection/streaming failed: ${e.message}", e)
                 stopSelf()
             } catch (e: Exception) {
                 Log.e(TAG, "Unexpected error: ${e.message}", e)
                 stopSelf()
+            } finally {
+                encoder?.stop()
+                // 采集结束，无声播放锚点恢复工作
+                SilentPlayer.setScenarioAllowed(this@AudioCaptureService, true)
             }
         }
+    }
+
+    // 写入一帧：4 字节大端长度 + 帧数据
+    private fun writeFrame(outputStream: java.io.OutputStream, payload: ByteArray) {
+        outputStream.write((payload.size ushr 24) and 0xFF)
+        outputStream.write((payload.size ushr 16) and 0xFF)
+        outputStream.write((payload.size ushr 8) and 0xFF)
+        outputStream.write(payload.size and 0xFF)
+        outputStream.write(payload)
     }
 
     override fun onDestroy() {

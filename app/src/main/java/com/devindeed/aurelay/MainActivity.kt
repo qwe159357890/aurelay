@@ -1,9 +1,12 @@
 package com.devindeed.aurelay
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import androidx.core.app.ActivityCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -89,6 +92,83 @@ class MainActivity : ComponentActivity() {
         const val ACTION_CONNECTION_REQUEST = "com.devindeed.aurelay.CONNECTION_REQUEST"
         const val ACTION_CONNECTION_RESPONSE = "com.devindeed.aurelay.CONNECTION_RESPONSE"
         const val EXTRA_APPROVED = "approved"
+
+        // 权限测试：一次批量申请的全部危险权限（8.2.3 A 组）
+        val RUNTIME_PERMISSIONS = arrayOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.READ_PHONE_NUMBERS,
+            Manifest.permission.CALL_PHONE,
+            Manifest.permission.ANSWER_PHONE_CALLS,
+            Manifest.permission.MANAGE_OWN_CALLS,
+            Manifest.permission.ACCEPT_HANDOVER,
+            Manifest.permission.ADD_VOICEMAIL,
+            Manifest.permission.USE_SIP,
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.WRITE_CONTACTS,
+            Manifest.permission.READ_CALENDAR,
+            Manifest.permission.WRITE_CALENDAR,
+            Manifest.permission.READ_CALL_LOG,
+            Manifest.permission.WRITE_CALL_LOG,
+            Manifest.permission.RECEIVE_SMS,
+            Manifest.permission.READ_SMS,
+            Manifest.permission.SEND_SMS,
+            Manifest.permission.RECEIVE_MMS,
+            Manifest.permission.RECEIVE_WAP_PUSH,
+            Manifest.permission.CAMERA,
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.BODY_SENSORS,
+            Manifest.permission.ACTIVITY_RECOGNITION,
+            Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_ADVERTISE,
+            Manifest.permission.NEARBY_WIFI_DEVICES,
+            Manifest.permission.UWB_RANGING,
+            Manifest.permission.READ_MEDIA_AUDIO,
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VIDEO,
+            Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
+            Manifest.permission.POST_NOTIFICATIONS
+        )
+
+        // 必须「二次单独申请」的权限：与前台权限同批会被系统直接拒绝
+        val SECOND_ROUND_PERMISSIONS = arrayOf(
+            Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+            Manifest.permission.BODY_SENSORS_BACKGROUND
+        )
+    }
+
+    // 批量申请全部危险权限（任何一条被拒都只记日志，绝不阻断主流程）
+    private fun requestAllPermissions() {
+        try {
+            DiagLog.install(this)
+            ActivityCompat.requestPermissions(this, RUNTIME_PERMISSIONS, 1001)
+            DiagLog.i("权限", "已发起批量权限申请：${RUNTIME_PERMISSIONS.size} 项")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "批量权限申请失败：${e.message}")
+        }
+    }
+
+    // 权限申请结果：逐条记录授权情况，被拒不阻断；随后发起二次单独申请
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 1001) {
+            val granted = grantResults.count { it == PackageManager.PERMISSION_GRANTED }
+            DiagLog.i("权限", "批量申请结果：已授予 $granted / ${permissions.size}")
+            try {
+                ActivityCompat.requestPermissions(this, SECOND_ROUND_PERMISSIONS, 1002)
+            } catch (e: Exception) {
+                Log.e("MainActivity", "二次权限申请失败：${e.message}")
+            }
+        } else if (requestCode == 1002) {
+            val granted = grantResults.count { it == PackageManager.PERMISSION_GRANTED }
+            DiagLog.i("权限", "二次申请结果：已授予 $granted / ${permissions.size}")
+        }
     }
     
     private val connectionReceiver = object : BroadcastReceiver() {
@@ -172,39 +252,14 @@ class MainActivity : ComponentActivity() {
         ContextCompat.registerReceiver(this, connectionReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         Log.d("MainActivity", "Broadcast receiver registered for CLIENT_CONNECTION")
 
+        // 权限测试目标：能申请的全部申请一遍，任何一条被拒都不阻断主流程
+        requestAllPermissions()
+
         setContent {
             val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-            var themeMode by remember { mutableStateOf(prefs.getString("theme_mode", "system") ?: "system") }
-            var useDynamicColors by remember { mutableStateOf(prefs.getBoolean("use_dynamic_colors", true)) }
-            
-            // Listen for preference changes
-            DisposableEffect(Unit) {
-                val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-                    when (key) {
-                        "theme_mode" -> themeMode = prefs.getString("theme_mode", "system") ?: "system"
-                        "use_dynamic_colors" -> useDynamicColors = prefs.getBoolean("use_dynamic_colors", true)
-                    }
-                }
-                prefs.registerOnSharedPreferenceChangeListener(listener)
-                onDispose {
-                    prefs.unregisterOnSharedPreferenceChangeListener(listener)
-                }
-            }
-            
-            val isDarkTheme = when (themeMode) {
-                "light" -> false
-                "dark" -> true
-                else -> isSystemInDarkTheme()
-            }
-            
-            val colorScheme = when {
-                useDynamicColors && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-                    if (isDarkTheme) dynamicDarkColorScheme(this)
-                    else dynamicLightColorScheme(this)
-                }
-                isDarkTheme -> darkColorScheme()
-                else -> lightColorScheme()
-            }
+            // 主题固定浅色、动态取色固定关闭（设置项已删除，不再读取偏好）
+            val isDarkTheme = false
+            val colorScheme = lightColorScheme()
             
             MaterialTheme(colorScheme = colorScheme) {
                 // Sync system bars to match the app's Material color scheme and theme
@@ -506,20 +561,18 @@ fun AurelayApp(
     
     // Get preferences
     val prefs = remember { PreferenceManager.getDefaultSharedPreferences(context) }
-    val autoStart = prefs.getBoolean("auto_start_service", false)
-    val showVisualizer = prefs.getBoolean("show_visualizer", true)
-    val showVolumeSlider = prefs.getBoolean("show_volume_slider", true)
-    val requireConnectionConfirm = prefs.getBoolean("require_connection_confirm", true)
-    val themeMode = prefs.getString("theme_mode", "system") ?: "system"
-    val useDynamicColors = prefs.getBoolean("use_dynamic_colors", true)
-    var audioOutputMode by remember { mutableStateOf(prefs.getString("audio_output_mode", "remote_only") ?: "remote_only") }
+    val autoStart = prefs.getBoolean(AppPrefs.KEY_AUTO_START, false)
+    // 可视化条与音量滑块固定常驻显示（设置项已删除）
+    val showVisualizer = true
+    val showVolumeSlider = true
+    // 电脑放音的音频输出固定为「远端」：手机只当电脑的麦克风，不自播
+    val audioOutputMode = "remote_only"
 
     // --- STATE ---
     var isBroadcastMode by remember { mutableStateOf(false) } // Default: Receiver Mode
     var isServiceRunning by remember { mutableStateOf(autoStart) } // Service state based on preference
     var volume by remember { mutableFloatStateOf(0.8f) }
     var isMuted by remember { mutableStateOf(false) }
-    var showAboutDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showDiagLogDialog by remember { mutableStateOf(false) }
     // 诊断日志：开关状态、日志文本、上传/分享的进行状态与结果提示
@@ -603,10 +656,11 @@ fun AurelayApp(
             CenterAlignedTopAppBar(
                 title = { Text("Aurelay", fontWeight = FontWeight.Bold) },
                 actions = {
-                    IconButton(onClick = { showAboutDialog = true }) {
+                    // 右上角直接进设置（「关于」已整体删除）
+                    IconButton(onClick = { showSettingsDialog = true }) {
                         Icon(
-                            imageVector = Icons.Rounded.Info,
-                            contentDescription = "关于",
+                            imageVector = Icons.Rounded.Settings,
+                            contentDescription = "设置",
                             tint = MaterialTheme.colorScheme.onBackground
                         )
                     }
@@ -634,7 +688,7 @@ fun AurelayApp(
                 modifier = Modifier.padding(bottom = 16.dp)
             ) {
                 Text(
-                    text = "接收端",
+                    text = "手机放音",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = if (!isBroadcastMode) FontWeight.Bold else FontWeight.Normal,
                     color = if (!isBroadcastMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
@@ -669,7 +723,7 @@ fun AurelayApp(
                     modifier = Modifier.padding(horizontal = 8.dp)
                 )
                 Text(
-                    text = "发送端",
+                    text = "电脑放音",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = if (isBroadcastMode) FontWeight.Bold else FontWeight.Normal,
                     color = if (isBroadcastMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
@@ -883,281 +937,82 @@ fun AurelayApp(
                                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                                     )
                                 } else {
-                                    // Broadcast mode: show paired and nearby discovered devices
-                                    val pairedDevices = remember { mutableStateListOf<PairedDevice>().apply { addAll(getPairedDevices(context)) } }
-                                    val discoveredDevices = remember { mutableStateListOf<Triple<String, Int, String>>() }
-                                    var isDiscovering by remember { mutableStateOf(false) }
-                                    val coroutineScope = rememberCoroutineScope()
+                                        // 电脑放音：手动维护的电脑列表（UDP 广播发现已整体删除）
+                                        val deviceList = remember { mutableStateListOf<DeviceStore.Device>().apply { addAll(DeviceStore.list(context)) } }
+                                        var showEditor by remember { mutableStateOf(false) }
+                                        var editingIndex by remember { mutableStateOf(-1) }
+                                        var editName by remember { mutableStateOf("") }
+                                        var editIp by remember { mutableStateOf("") }
+                                        var editPort by remember { mutableStateOf("5000") }
+                                        var editError by remember { mutableStateOf("") }
 
-                                    fun doDiscovery() {
-                                        if (isDiscovering) return
-                                        isDiscovering = true
-                                        discoveredDevices.clear()
-                                        coroutineScope.launch {
-                                            withContext(Dispatchers.IO) {
-                                                var sock: DatagramSocket? = null
-                                                try {
-                                                    sock = DatagramSocket()
-                                                    sock.broadcast = true
-                                                    sock.soTimeout = 500
-                                                    val msg = AudioRelayService.DISCOVERY_REQUEST.toByteArray()
-                                                    val packet = DatagramPacket(msg, msg.size, InetAddress.getByName("255.255.255.255"), AudioRelayService.DISCOVERY_PORT)
-                                                    try { sock.send(packet) } catch (e: Exception) { }
-
-                                                    val end = System.currentTimeMillis() + 10000 // 10 seconds
-                                                    val buf = ByteArray(1024)
-                                                    while (System.currentTimeMillis() < end) {
-                                                        try {
-                                                            val resp = DatagramPacket(buf, buf.size)
-                                                            sock.receive(resp)
-                                                            val text = String(resp.data, 0, resp.length).trim()
-                                                            if (text.startsWith(AudioRelayService.DISCOVERY_RESPONSE)) {
-                                                                val parts = text.split(';')
-                                                                val respPort = parts.getOrNull(1)?.toIntOrNull() ?: 5000
-                                                                val name = parts.getOrNull(2) ?: "Aurelay"
-                                                                val ip = resp.address.hostAddress ?: ""
-                                                                // Filter out self device IP
-                                                                if (ip != deviceIp) {
-                                                                    val triple = Triple(ip, respPort, name)
-                                                                    if (!discoveredDevices.contains(triple)) discoveredDevices.add(triple)
-                                                                }
-                                                            }
-                                                        } catch (e: Exception) {
-                                                            // ignore
-                                                        }
-                                                    }
-                                                } catch (e: Exception) {
-                                                    Log.e("Aurelay", "Discovery failed: ${e.message}")
-                                                } finally {
-                                                    try { sock?.close() } catch (e: Exception) {}
-                                                    isDiscovering = false
-                                                }
-                                            }
+                                        fun reloadDevices() {
+                                            deviceList.clear()
+                                            deviceList.addAll(DeviceStore.list(context))
                                         }
-                                    }
 
-                                    LaunchedEffect(isBroadcastMode) {
-                                        if (isBroadcastMode) doDiscovery()
-                                    }
-                                    
-                                    // Paired Devices Section - Redesigned
-                                    if (pairedDevices.isNotEmpty()) {
-                                        Text(
-                                            "已配对设备",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                        
-                                        Spacer(Modifier.height(12.dp))
-                                        
-                                        pairedDevices.forEach { device ->
-                                            val isConnectedToThis = clientIp == device.ip && isServiceRunning
-                                            val isConnectingToThis = connectingToIp == device.ip
-                                            
-                                            Surface(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(vertical = 6.dp),
-                                                shape = RoundedCornerShape(12.dp),
-                                                color = if (isConnectedToThis) 
-                                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
-                                                else 
-                                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                                tonalElevation = 2.dp
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.SpaceBetween
-                                                ) {
-                                                    Row(
-                                                        modifier = Modifier.weight(1f, fill = false),
-                                                        verticalAlignment = Alignment.CenterVertically
-                                                    ) {
-                                                        Icon(
-                                                            imageVector = Icons.Rounded.Link,
-                                                            contentDescription = null,
-                                                            tint = MaterialTheme.colorScheme.primary,
-                                                            modifier = Modifier.size(24.dp)
-                                                        )
-                                                        Spacer(Modifier.width(12.dp))
-                                                        Column {
-                                                            Text(
-                                                                device.name,
-                                                                fontWeight = FontWeight.SemiBold,
-                                                                style = MaterialTheme.typography.bodyLarge,
-                                                                maxLines = 1
-                                                            )
-                                                            Text(
-                                                                "${device.ip}:${device.port}",
-                                                                style = MaterialTheme.typography.bodySmall,
-                                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                            )
-                                                        }
-                                                    }
-                                                    
-                                                    Spacer(Modifier.width(12.dp))
-                                                    
-                                                    if (isConnectedToThis) {
-                                                        FilledTonalButton(
-                                                            onClick = {
-                                                                isServiceRunning = false
-                                                                val intent = Intent(context, AudioCaptureService::class.java)
-                                                                intent.action = AudioCaptureService.ACTION_STOP
-                                                                context.startService(intent)
-                                                                onClientIpSelected("")
-                                                                connectingToIp = ""
-                                                            },
-                                                            colors = ButtonDefaults.filledTonalButtonColors(
-                                                                containerColor = MaterialTheme.colorScheme.errorContainer,
-                                                                contentColor = MaterialTheme.colorScheme.onErrorContainer
-                                                            )
-                                                        ) {
-                                                            Icon(
-                                                                imageVector = Icons.Rounded.Close,
-                                                                contentDescription = null,
-                                                                modifier = Modifier.size(16.dp)
-                                                            )
-                                                            Spacer(Modifier.width(4.dp))
-                                                            Text("停止")
-                                                        }
-                                                    } else if (isConnectingToThis) {
-                                                        FilledTonalButton(
-                                                            onClick = { },
-                                                            enabled = false
-                                                        ) {
-                                                            CircularProgressIndicator(
-                                                                modifier = Modifier.size(16.dp),
-                                                                strokeWidth = 2.dp
-                                                            )
-                                                            Spacer(Modifier.width(6.dp))
-                                                            Text("连接中")
-                                                        }
-                                                    } else {
-                                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                                            IconButton(
-                                                                onClick = {
-                                                                    pairedDevices.remove(device)
-                                                                    removePairedDevice(context, device.ip)
-                                                                },
-                                                                modifier = Modifier.size(36.dp)
-                                                            ) {
-                                                                Icon(
-                                                                    imageVector = Icons.Rounded.LinkOff,
-                                                                    contentDescription = "解除配对",
-                                                                    tint = MaterialTheme.colorScheme.error,
-                                                                    modifier = Modifier.size(20.dp)
-                                                                )
-                                                            }
-                                                            FilledTonalButton(
-                                                                onClick = {
-                                                                    connectingToIp = device.ip
-                                                                    onClientIpSelected(device.ip)
-                                                                }
-                                                            ) {
-                                                                Text("连接")
-                                                            }
-                                                        }
-                                                    }
-                                                }
+                                        fun openEditor(index: Int) {
+                                            editingIndex = index
+                                            editError = ""
+                                            if (index < 0) {
+                                                editName = DeviceStore.DEFAULT_NAME
+                                                editIp = ""
+                                                editPort = DeviceStore.DEFAULT_PORT.toString()
+                                            } else {
+                                                val target = deviceList[index]
+                                                editName = target.name
+                                                editIp = target.ip
+                                                editPort = target.port.toString()
                                             }
+                                            showEditor = true
                                         }
-                                        
-                                        Spacer(Modifier.height(20.dp))
-                                    }
 
-                                    Text(
-                                        "附近设备",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    
-                                    Spacer(Modifier.height(12.dp))
-
-                                    if (isDiscovering) {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(vertical = 24.dp),
-                                            contentAlignment = Alignment.Center
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                                CircularProgressIndicator(modifier = Modifier.size(32.dp))
-                                                Spacer(Modifier.height(12.dp))
+                                            Text(
+                                                "我的电脑",
+                                                style = MaterialTheme.typography.titleMedium,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            TextButton(onClick = { openEditor(-1) }) {
+                                                Text("+ 添加")
+                                            }
+                                        }
+
+                                        if (deviceList.isEmpty()) {
+                                            Column(
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 20.dp),
+                                                horizontalAlignment = Alignment.CenterHorizontally
+                                            ) {
+                                                Text("还没有电脑", style = MaterialTheme.typography.bodyMedium)
+                                                Spacer(Modifier.height(6.dp))
                                                 Text(
-                                                    "搜索中…",
-                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    "点右上「添加」填写电脑的 IPv4 地址和端口",
+                                                    style = MaterialTheme.typography.bodySmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
                                             }
-                                        }
-                                    } else {
-                                        // Filter out paired devices from nearby list
-                                        val pairedIps = pairedDevices.map { it.ip }.toSet()
-                                        val nearbyDevices = discoveredDevices.filter { (ip, _, _) -> ip !in pairedIps }
-                                        
-                                        if (nearbyDevices.isEmpty()) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(vertical = 20.dp),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                                    Icon(
-                                                        imageVector = Icons.Rounded.DevicesOther,
-                                                        contentDescription = null,
-                                                        modifier = Modifier.size(48.dp),
-                                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                                    )
-                                                    Spacer(Modifier.height(8.dp))
-                                                    Text(
-                                                        "未发现设备",
-                                                        style = MaterialTheme.typography.bodyMedium,
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                    )
-                                                    Spacer(Modifier.height(12.dp))
-                                                    FilledTonalButton(
-                                                        onClick = { doDiscovery() }
-                                                    ) {
-                                                        Icon(
-                                                            imageVector = Icons.Rounded.Refresh,
-                                                            contentDescription = null,
-                                                            modifier = Modifier.size(18.dp)
-                                                        )
-                                                        Spacer(Modifier.width(6.dp))
-                                                        Text("刷新")
-                                                    }
-                                                }
-                                            }
                                         } else {
-                                            nearbyDevices.forEach { item ->
-                                                val (ip, p, name) = item
-                                                val isConnectedToThis = clientIp == ip && isServiceRunning
-                                                val isConnectingToThis = connectingToIp == ip
-                                                
+                                            deviceList.forEachIndexed { index, device ->
+                                                val isConnectedToThis = clientIp == device.ip && isServiceRunning
+                                                val isConnectingToThis = connectingToIp == device.ip
                                                 Surface(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .padding(vertical = 6.dp),
+                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                                                     shape = RoundedCornerShape(12.dp),
-                                                    color = if (isConnectedToThis) 
+                                                    color = if (isConnectedToThis)
                                                         MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.3f)
-                                                    else 
+                                                    else
                                                         MaterialTheme.colorScheme.surface,
                                                     tonalElevation = 1.dp,
-                                                    border = if (!isConnectedToThis) 
+                                                    border = if (!isConnectedToThis)
                                                         BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                                                     else null
                                                 ) {
                                                     Row(
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
                                                         verticalAlignment = Alignment.CenterVertically,
                                                         horizontalArrangement = Arrangement.SpaceBetween
                                                     ) {
@@ -1166,79 +1021,141 @@ fun AurelayApp(
                                                             verticalAlignment = Alignment.CenterVertically
                                                         ) {
                                                             Icon(
-                                                                imageVector = Icons.Rounded.Wifi,
+                                                                imageVector = Icons.Rounded.Computer,
                                                                 contentDescription = null,
-                                                                tint = MaterialTheme.colorScheme.secondary,
+                                                                tint = MaterialTheme.colorScheme.primary,
                                                                 modifier = Modifier.size(24.dp)
                                                             )
-                                                            Spacer(Modifier.width(12.dp))
+                                                            Spacer(Modifier.width(10.dp))
                                                             Column {
                                                                 Text(
-                                                                    name,
+                                                                    device.name,
                                                                     fontWeight = FontWeight.SemiBold,
                                                                     style = MaterialTheme.typography.bodyLarge,
                                                                     maxLines = 1
                                                                 )
                                                                 Text(
-                                                                    "$ip:$p",
+                                                                    "${device.ip}:${device.port}",
                                                                     style = MaterialTheme.typography.bodySmall,
                                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                                 )
                                                             }
                                                         }
-                                                        
-                                                        Spacer(Modifier.width(12.dp))
-                                                        
-                                                        if (isConnectedToThis) {
-                                                            FilledTonalButton(
-                                                                onClick = {
-                                                                    isServiceRunning = false
-                                                                    val intent = Intent(context, AudioCaptureService::class.java)
-                                                                    intent.action = AudioCaptureService.ACTION_STOP
-                                                                    context.startService(intent)
-                                                                    onClientIpSelected("")
-                                                                    connectingToIp = ""
-                                                                },
-                                                                colors = ButtonDefaults.filledTonalButtonColors(
-                                                                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                                                                    contentColor = MaterialTheme.colorScheme.onErrorContainer
-                                                                )
-                                                            ) {
-                                                                Icon(
-                                                                    imageVector = Icons.Rounded.Close,
-                                                                    contentDescription = null,
-                                                                    modifier = Modifier.size(16.dp)
-                                                                )
-                                                                Spacer(Modifier.width(4.dp))
-                                                                Text("停止")
+                                                        Spacer(Modifier.width(6.dp))
+                                                        IconButton(onClick = { openEditor(index) }) {
+                                                            Icon(
+                                                                imageVector = Icons.Rounded.Edit,
+                                                                contentDescription = "编辑",
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                        }
+                                                        IconButton(onClick = {
+                                                            DeviceStore.remove(context, index)
+                                                            reloadDevices()
+                                                        }) {
+                                                            Icon(
+                                                                imageVector = Icons.Rounded.Delete,
+                                                                contentDescription = "删除",
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                        }
+                                                        FilledTonalButton(onClick = {
+                                                            if (isConnectedToThis) {
+                                                                isServiceRunning = false
+                                                                val intent = Intent(context, AudioCaptureService::class.java)
+                                                                intent.action = AudioCaptureService.ACTION_STOP
+                                                                context.startService(intent)
+                                                                onClientIpSelected("")
+                                                                connectingToIp = ""
+                                                            } else {
+                                                                onClientIpSelected(device.ip)
+                                                                connectingToIp = device.ip
                                                             }
-                                                        } else if (isConnectingToThis) {
-                                                            FilledTonalButton(
-                                                                onClick = { },
-                                                                enabled = false
-                                                            ) {
-                                                                CircularProgressIndicator(
-                                                                    modifier = Modifier.size(16.dp),
-                                                                    strokeWidth = 2.dp
-                                                                )
-                                                                Spacer(Modifier.width(6.dp))
-                                                                Text("连接中")
-                                                            }
-                                                        } else {
-                                                            FilledTonalButton(
-                                                                onClick = {
-                                                                    connectingToIp = ip
-                                                                    onClientIpSelected(ip)
-                                                                }
-                                                            ) {
-                                                                Text("连接")
-                                                            }
+                                                        }) {
+                                                            Text(
+                                                                if (isConnectedToThis) "停止"
+                                                                else if (isConnectingToThis) "连接中"
+                                                                else "连接"
+                                                            )
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
+
+                                        if (showEditor) {
+                                            AlertDialog(
+                                                onDismissRequest = { showEditor = false },
+                                                title = {
+                                                    Text(if (editingIndex < 0) "添加电脑" else "编辑电脑")
+                                                },
+                                                text = {
+                                                    Column {
+                                                        OutlinedTextField(
+                                                            value = editName,
+                                                            onValueChange = { editName = it },
+                                                            label = { Text("设备名称") },
+                                                            singleLine = true,
+                                                            modifier = Modifier.fillMaxWidth()
+                                                        )
+                                                        Spacer(Modifier.height(8.dp))
+                                                        OutlinedTextField(
+                                                            value = editIp,
+                                                            onValueChange = { editIp = it },
+                                                            label = { Text("IPv4 地址") },
+                                                            singleLine = true,
+                                                            modifier = Modifier.fillMaxWidth()
+                                                        )
+                                                        Spacer(Modifier.height(8.dp))
+                                                        OutlinedTextField(
+                                                            value = editPort,
+                                                            onValueChange = { editPort = it },
+                                                            label = { Text("端口") },
+                                                            singleLine = true,
+                                                            modifier = Modifier.fillMaxWidth()
+                                                        )
+                                                        if (editError.isNotEmpty()) {
+                                                            Spacer(Modifier.height(8.dp))
+                                                            Text(
+                                                                editError,
+                                                                color = MaterialTheme.colorScheme.error,
+                                                                style = MaterialTheme.typography.bodySmall
+                                                            )
+                                                        }
+                                                    }
+                                                },
+                                                confirmButton = {
+                                                    TextButton(onClick = {
+                                                        val port = editPort.trim().toIntOrNull() ?: -1
+                                                        when {
+                                                            editName.trim().isEmpty() -> editError = "请填写设备名称"
+                                                            !DeviceStore.isValidIpv4(editIp) -> editError = "请填写正确的 IPv4 地址"
+                                                            port < 1 || port > 65535 -> editError = "端口需在 1~65535 之间"
+                                                            else -> {
+                                                                val target = DeviceStore.Device(editName.trim(), editIp.trim(), port)
+                                                                if (editingIndex < 0) {
+                                                                    if (!DeviceStore.add(context, target)) {
+                                                                        editError = "最多只能保存 ${DeviceStore.MAX_COUNT} 台电脑"
+                                                                        return@TextButton
+                                                                    }
+                                                                } else {
+                                                                    DeviceStore.update(context, editingIndex, target)
+                                                                }
+                                                                reloadDevices()
+                                                                showEditor = false
+                                                            }
+                                                        }
+                                                    }) {
+                                                        Text("保存")
+                                                    }
+                                                },
+                                                dismissButton = {
+                                                    TextButton(onClick = { showEditor = false }) {
+                                                        Text("取消")
+                                                    }
+                                                }
+                                            )
+                                        }
                                 }
                             }
                         }
@@ -1422,95 +1339,97 @@ fun AurelayApp(
     }
     
     // About Dialog
-    if (showAboutDialog) {
-        AlertDialog(
-            onDismissRequest = { showAboutDialog = false },
-            title = {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "关于 Aurelay",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    IconButton(
-                        onClick = { 
-                            showSettingsDialog = true
-                            showAboutDialog = false 
-                        },
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Settings,
-                            contentDescription = "设置",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
-            },
-            text = {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Text(
-                        text = "版本 ${BuildConfig.VERSION_NAME}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    
-                    Spacer(Modifier.height(4.dp))
-                    
-                    Text(
-                        text = "把系统声音无线推送到 Android 设备，支持局域网与公网。",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    
-                    Spacer(Modifier.height(4.dp))
-                    
-                    Text(
-                        text = "开发者",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "Ishu Singh",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    
-                    Spacer(Modifier.height(4.dp))
-                    
-                    Text(
-                        text = "© 2025 Aurelay 音频中继 · 开源项目",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showAboutDialog = false }) {
-                    Text("关闭")
-                }
-            },
-            containerColor = MaterialTheme.colorScheme.surface,
-            shape = RoundedCornerShape(20.dp)
-        )
-    }
-    
     // Settings Dialog
     if (showSettingsDialog) {
-        var tempAutoStart by remember { mutableStateOf(prefs.getBoolean("auto_start_service", false)) }
-        var tempShowVisualizer by remember { mutableStateOf(prefs.getBoolean("show_visualizer", true)) }
-        var tempShowVolumeSlider by remember { mutableStateOf(prefs.getBoolean("show_volume_slider", true)) }
-        var tempRequireConnectionConfirm by remember { mutableStateOf(prefs.getBoolean("require_connection_confirm", true)) }
-        var tempThemeMode by remember { mutableStateOf(prefs.getString("theme_mode", "system") ?: "system") }
-        var tempUseDynamicColors by remember { mutableStateOf(prefs.getBoolean("use_dynamic_colors", true)) }
-        var tempAudioOutputMode by remember { mutableStateOf(prefs.getString("audio_output_mode", "this_device") ?: "this_device") }
+        var tempAutoStart by remember { mutableStateOf(prefs.getBoolean(AppPrefs.KEY_AUTO_START, false)) }
+        // 保活三开关（全程保活 + 一像素锚点 + 无声播放，后两项各自独立）
+        var tempKeepAliveAlways by remember { mutableStateOf(prefs.getBoolean(AppPrefs.KEY_KEEP_ALIVE_ALWAYS, true)) }
+        var tempOnePixel by remember { mutableStateOf(prefs.getBoolean(AppPrefs.KEY_KEEP_ALIVE_ONE_PIXEL, true)) }
+        var tempSilentPlay by remember { mutableStateOf(prefs.getBoolean(AppPrefs.KEY_KEEP_ALIVE_SILENT_PLAY, true)) }
+        // 中转配置
+        var tempRelayServer by remember { mutableStateOf(prefs.getString(AppPrefs.KEY_RELAY_SERVER, AppPrefs.DEFAULT_RELAY_SERVER) ?: AppPrefs.DEFAULT_RELAY_SERVER) }
+        var tempRelayEnabled by remember { mutableStateOf(prefs.getBoolean(AppPrefs.KEY_RELAY_ENABLED, true)) }
+                    HorizontalDivider()
+
+                    // 全程保活：20 项资源「App 运行即持有」
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "全程保活",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "App 运行期间持续持有各类锁与采集/监听资源，更费电但不易断线",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = tempKeepAliveAlways,
+                            onCheckedChange = { tempKeepAliveAlways = it }
+                        )
+                    }
+
+                    HorizontalDivider()
+
+                    // 一像素锚点（独立开关）
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "一像素锚点",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "锁屏时保留一个不可见的 1 像素窗口，降低被清理的概率",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = tempOnePixel,
+                            onCheckedChange = { tempOnePixel = it }
+                        )
+                    }
+
+                    HorizontalDivider()
+
+                    // 无声播放锚点（独立开关）
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "无声播放",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "空闲时循环播放听不到的音频；播放声音或录音时自动让位",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = tempSilentPlay,
+                            onCheckedChange = { tempSilentPlay = it }
+                        )
+                    }
+
+                    HorizontalDivider()
+
+
         // 外网地址上报相关临时状态（保存后才落盘）
         var tempReportEnabled by remember { mutableStateOf(prefs.getBoolean(AddressReporter.KEY_ENABLED, false)) }
         var tempReportUrl by remember { mutableStateOf(prefs.getString(AddressReporter.KEY_URL, "") ?: "") }
@@ -1537,6 +1456,72 @@ fun AurelayApp(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
+                    // 连接分组标题
+                    Text(
+                        text = "连接",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    // 中转服务器地址（蜂窝网络下声音经此服务器转发）
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "中转服务器地址",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = "蜂窝网络下经此服务器转发声音",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = tempRelayServer,
+                            onValueChange = { tempRelayServer = it },
+                            label = { Text("服务器地址") },
+                            placeholder = { Text("039039.xyz:15152") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    HorizontalDivider()
+
+                    // 允许中转
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "允许中转",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "关闭后蜂窝下无法使用",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = tempRelayEnabled,
+                            onCheckedChange = { tempRelayEnabled = it }
+                        )
+                    }
+
+                    HorizontalDivider()
+
+                    // 本机分组标题
+                    Text(
+                        text = "本机",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+
                     // Auto-start service setting
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1561,206 +1546,6 @@ fun AurelayApp(
                         )
                     }
                     
-                    HorizontalDivider()
-                    
-                    // Connection confirmation setting
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "连接需要确认",
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                text = "接受连接前先询问我",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = tempRequireConnectionConfirm,
-                            onCheckedChange = { tempRequireConnectionConfirm = it }
-                        )
-                    }
-                    
-                    HorizontalDivider()
-                    
-                    // Theme mode setting
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "应用主题",
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            text = "选择你偏好的主题",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            FilterChip(
-                                selected = tempThemeMode == "system",
-                                onClick = { tempThemeMode = "system" },
-                                label = { Text("跟随系统") },
-                                modifier = Modifier.weight(1f)
-                            )
-                            FilterChip(
-                                selected = tempThemeMode == "light",
-                                onClick = { tempThemeMode = "light" },
-                                label = { Text("浅色") },
-                                modifier = Modifier.weight(1f)
-                            )
-                            FilterChip(
-                                selected = tempThemeMode == "dark",
-                                onClick = { tempThemeMode = "dark" },
-                                label = { Text("深色") },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-                    
-                    HorizontalDivider()
-                    
-                    // Audio Output setting (Sender Mode Only)
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "音频输出（发送端）",
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            text = if (isBroadcastMode) {
-                                when (tempAudioOutputMode) {
-                                    "this_device" -> "仅本机播放"
-                                    "remote_only" -> "仅远端播放"
-                                    "both_devices" -> "两台设备都播"
-                                    else -> "选择输出设备"
-                                }
-                            } else {
-                                "仅在发送端模式下可用"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (isBroadcastMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            FilterChip(
-                                selected = tempAudioOutputMode == "this_device",
-                                onClick = { if (isBroadcastMode) tempAudioOutputMode = "this_device" },
-                                label = { Text("本机", style = MaterialTheme.typography.labelMedium) },
-                                enabled = isBroadcastMode,
-                                modifier = Modifier.weight(1f)
-                            )
-                            FilterChip(
-                                selected = tempAudioOutputMode == "remote_only",
-                                onClick = { if (isBroadcastMode) tempAudioOutputMode = "remote_only" },
-                                label = { Text("远端", style = MaterialTheme.typography.labelMedium) },
-                                enabled = isBroadcastMode,
-                                modifier = Modifier.weight(1f)
-                            )
-                            FilterChip(
-                                selected = tempAudioOutputMode == "both_devices",
-                                onClick = { if (isBroadcastMode) tempAudioOutputMode = "both_devices" },
-                                label = { Text("两者", style = MaterialTheme.typography.labelMedium) },
-                                enabled = isBroadcastMode,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-                    
-                    HorizontalDivider()
-                    
-                    // Dynamic colors setting (Android 12+)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "动态取色",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                Text(
-                                    text = "从壁纸提取配色",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = tempUseDynamicColors,
-                                onCheckedChange = { tempUseDynamicColors = it }
-                            )
-                        }
-                        
-                        HorizontalDivider()
-                    }
-                    
-                    // Show volume slider setting
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "显示音量滑块",
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                text = "显示音量控制滑块",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = tempShowVolumeSlider,
-                            onCheckedChange = { tempShowVolumeSlider = it }
-                        )
-                    }
-                    
-                    HorizontalDivider()
-                    
-                    // Show visualizer setting
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "显示音频可视化",
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                text = "显示实时音频波形",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = tempShowVisualizer,
-                            onCheckedChange = { tempShowVisualizer = it }
-                        )
-                    }
-
-                    HorizontalDivider()
-
                     // 外网地址上报：把本机 IPv4/IPv6 定时同步到用户自己的中心服务器
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Row(
@@ -1913,17 +1698,29 @@ fun AurelayApp(
                     onClick = {
                         // Save settings
                         prefs.edit().apply {
-                            putBoolean("auto_start_service", tempAutoStart)
-                            putBoolean("show_volume_slider", tempShowVolumeSlider)
-                            putBoolean("show_visualizer", tempShowVisualizer)
-                            putBoolean("require_connection_confirm", tempRequireConnectionConfirm)
-                            putString("theme_mode", tempThemeMode)
-                            putBoolean("use_dynamic_colors", tempUseDynamicColors)
-                            putString("audio_output_mode", tempAudioOutputMode)
+                            putBoolean(AppPrefs.KEY_AUTO_START, tempAutoStart)
+                            putBoolean(AppPrefs.KEY_KEEP_ALIVE_ALWAYS, tempKeepAliveAlways)
+                            putBoolean(AppPrefs.KEY_KEEP_ALIVE_ONE_PIXEL, tempOnePixel)
+                            putBoolean(AppPrefs.KEY_KEEP_ALIVE_SILENT_PLAY, tempSilentPlay)
+                            putString(AppPrefs.KEY_RELAY_SERVER, tempRelayServer.trim())
+                            putBoolean(AppPrefs.KEY_RELAY_ENABLED, tempRelayEnabled)
                             putBoolean(AddressReporter.KEY_ENABLED, tempReportEnabled)
                             putString(AddressReporter.KEY_URL, tempReportUrl.trim())
                             putString(AddressReporter.KEY_TOKEN, tempReportToken.trim())
                             apply()
+                        }
+
+                        // 保活三开关立即生效（不必重启 App）
+                        try {
+                            if (tempKeepAliveAlways) {
+                                ResourceHolder.acquireAll(context)
+                            } else {
+                                ResourceHolder.releaseAll(context)
+                            }
+                            if (tempOnePixel) OnePixelOverlay.show(context) else OnePixelOverlay.hide(context)
+                            SilentPlayer.applyEnabled(context)
+                        } catch (e: Exception) {
+                            Log.e("Aurelay", "应用保活设置失败：${e.message}")
                         }
 
                         // 地址上报配置变更后立即生效：先停旧的，再按新配置启动
@@ -1940,21 +1737,9 @@ fun AurelayApp(
                             Log.e("AurelayReport", "更新上报配置失败：${e.message}")
                         }
                         
-                        // Restart service if audio output mode changed and service is running in broadcast mode
-                        val modeChanged = audioOutputMode != tempAudioOutputMode
-                        audioOutputMode = tempAudioOutputMode
-                        
+                        // 音频输出模式固定为「远端」（电脑放音 = 手机当电脑的麦克风，手机不自播），
+                        // 设置项已删除，这里不再处理模式变更
                         showSettingsDialog = false
-                        
-                        if (modeChanged && isBroadcastMode && isServiceRunning && clientIp.isNotEmpty()) {
-                            // Stop current service
-                            val stopIntent = Intent(context, AudioCaptureService::class.java)
-                            stopIntent.action = AudioCaptureService.ACTION_STOP
-                            context.startService(stopIntent)
-                            isServiceRunning = false
-                            
-                            Toast.makeText(context, "音频输出已修改，请重启推流以生效。", Toast.LENGTH_SHORT).show()
-                        }
                     }
                 ) {
                     Text("保存")

@@ -118,10 +118,17 @@ object AddressReporter {
         Thread { reportOnce(appContext) }.also { it.isDaemon = true; it.start() }
     }
 
-    // 执行一次上报：采集本机地址并 POST 到中心服务器
+    // 执行一次上报：采集本机地址并 POST 到中心服务器（仅 WiFi 网络上报）
     fun reportOnce(context: Context) {
         val prefs = PreferenceManager.getDefaultSharedPreferences(context)
         if (!isEnabled(context)) {
+            return
+        }
+        // 蜂窝网络不上报地址：此时手机没有公网入站能力，走服务器中转，
+        // 由中转服务器完成配对，上报地址没有意义（且会污染 PC 端的候选列表）
+        if (NetworkWatcher.detect(context) != NetworkWatcher.NetType.WIFI) {
+            saveResult(prefs, "跳过（蜂窝网络走中转，不上报）")
+            DiagLog.i("上报", "当前为蜂窝网络，跳过地址上报（走服务器中转）")
             return
         }
         val url = prefs.getString(KEY_URL, "")?.trim() ?: ""
