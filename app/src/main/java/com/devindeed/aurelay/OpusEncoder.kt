@@ -22,7 +22,9 @@ class OpusEncoder {
         private const val SAMPLE_RATE = 48000
 
         // 声道数
-        private const val CHANNELS = 2
+        // 声道数：固定单声道。麦克风物理上只有一个声道，强行按立体声编码
+        // 只会让帧长翻倍、流量翻倍，音质却没有任何提升（左右声道内容相同）
+        private const val CHANNELS = 1
 
         // 目标码率（bps）
         private const val BIT_RATE = 128000
@@ -62,7 +64,7 @@ class OpusEncoder {
             encoder.start()
             codec = encoder
             presentationIndex = 0L
-            DiagLog.i("编码", "Opus 编码器已启动：48kHz/2ch/20ms/128kbps，单帧 ${FRAME_BYTES} 字节")
+            DiagLog.i("编码", "Opus 编码器已启动：48kHz/1ch/20ms/128kbps，单帧 ${FRAME_BYTES} 字节")
             true
         } catch (e: Exception) {
             DiagLog.e("编码", "Opus 编码器启动失败（设备无可用 audio/opus 编码器）", e)

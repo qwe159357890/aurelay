@@ -141,21 +141,17 @@ class AudioCaptureService : Service() {
                 targetPort = intent.getIntExtra(EXTRA_TARGET_PORT, 5000)
                 audioOutputMode = intent.getStringExtra(EXTRA_AUDIO_OUTPUT_MODE) ?: "remote_only"
 
+                // 必须先把前台通知挂上：用 startForegroundService() 启动后 5 秒内
+                // 没调用 startForeground()，系统会抛 ForegroundServiceDidNotStartInTimeException
+                // 直接把 App 崩掉（实测崩溃栈就是它）。所以这一步要先于任何分支判断。
+                promoteToForeground()
+
                 if (targetIp.isNotEmpty()) {
                     // 电脑放音只需麦克风，不申请屏幕投射 → 系统不会弹「录制或投射」提示
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        ServiceCompat.startForeground(
-                            this,
-                            NOTIFICATION_ID,
-                            createNotification(),
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                        )
-                    } else {
-                        startForeground(NOTIFICATION_ID, createNotification())
-                    }
                     startCapture()
                 } else {
                     Log.e(TAG, "缺少目标电脑 IP")
+                    DiagLog.e("采集", "启动失败：目标电脑 IP 为空（EXTRA_TARGET_IP 未传入）")
                     stopSelf()
                 }
             }
@@ -164,6 +160,26 @@ class AudioCaptureService : Service() {
             }
         }
         return START_NOT_STICKY
+    }
+
+    // 挂前台通知：startForegroundService() 后 5 秒内必须调用 startForeground()
+    private fun promoteToForeground() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceCompat.startForeground(
+                    this,
+                    NOTIFICATION_ID,
+                    createNotification(),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, createNotification())
+            }
+            Log.d(TAG, "前台通知已挂载（类型=microphone）")
+        } catch (ex: Exception) {
+            Log.e(TAG, "挂前台通知失败：${ex.message}")
+            DiagLog.e("服务", "挂前台通知失败：${ex.javaClass.simpleName}：${ex.message}")
+        }
     }
 
     // 启动麦克风采集并推流（电脑放音模式：手机当电脑的无线麦克风）
@@ -177,16 +193,26 @@ class AudioCaptureService : Service() {
         val audioFormat = AudioFormat.Builder()
             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
             .setSampleRate(48000)  // 与 Opus 编码规格一致（48kHz）
-            .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
+            // ⚠️ 必须单声道：手机麦克风物理上只有一个声道，请求 CHANNEL_IN_STEREO
+            //    在多数机型上会「建得起来但读出全零」——实测 PC 端解码后 RMS=0 就是这么来的
+            .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
             .build()
 
         val minBufferSize = AudioRecord.getMinBufferSize(
             48000,
-            AudioFormat.CHANNEL_IN_STEREO,
+            AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
         )
-        // 缓冲取「系统最小值」与「20ms 立体声帧」的较大者，保证能装下一整帧
-        val bufferSize = maxOf(minBufferSize, 48000 * 2 * 2 * 20 / 1000)
+        // 借 MicYou(AudioEngine) 的做法：getMinBufferSize 返回负值说明设备不支持这套
+        // 参数，此时硬开 AudioRecord 只会一路读出全零——必须显式失败而不是撑着
+        if (minBufferSize <= 0) {
+            Log.e(TAG, "设备不支持该采集参数：minBufferSize=$minBufferSize")
+            DiagLog.e("采集", "设备不支持 48kHz/单声道/16bit 采集：minBufferSize=$minBufferSize")
+            stopSelf()
+            return
+        }
+        // 缓冲按系统最小值的 3 倍申请（MicYou 同款做法），留足余量避免欠载
+        val bufferSize = minBufferSize * 3
 
         try {
             // Only start AudioRecord for modes that need streaming
@@ -197,8 +223,26 @@ class AudioCaptureService : Service() {
                     .setBufferSizeInBytes(bufferSize)
                     .build()
 
+                // 建出来不等于能用：必须确认已进入 STATE_INITIALIZED，
+                // 否则 startRecording() 会抛异常，或者一路读出全零（表现就是电脑端静音）
+                val state = audioRecord?.state ?: AudioRecord.STATE_UNINITIALIZED
+                if (state != AudioRecord.STATE_INITIALIZED) {
+                    Log.e(TAG, "AudioRecord 未初始化：state=$state")
+                    DiagLog.e(
+                        "采集",
+                        "AudioRecord 未初始化：state=$state（48kHz/单声道/16bit，系统最小缓冲=${minBufferSize}）"
+                    )
+                    stopSelf()
+                    return
+                }
+
                 audioRecord?.startRecording()
                 isStreaming = true
+                DiagLog.i(
+                    "采集",
+                    "麦克风采集已启动：48kHz/单声道/16bit，缓冲=${bufferSize}字节" +
+                        "（系统最小=${minBufferSize}）"
+                )
             }
                 
                 // Initialize local audio playback ONLY for both_devices mode
@@ -301,13 +345,15 @@ class AudioCaptureService : Service() {
                 val codec = if (encoder != null) 1 else 0
 
                 // 发送 8 字节 AURL 包头：魔数 + 版本 + 编码 + 声道 + 采样率代码
+                // 声道数字节写 1：与「单声道麦克风采集 + 单声道编码」保持一致，
+                // PC 端按包头这个字节决定解码声道数，两边必须一致
                 val header = byteArrayOf(
                     0x41, 0x55, 0x52, 0x4C, // "AURL"
-                    1, codec.toByte(), 2, 1
+                    1, codec.toByte(), 1, 1
                 )
                 outputStream.write(header)
                 outputStream.flush()
-                DiagLog.i("协议", "已发送 AURL 包头：编码=${if (codec == 1) "Opus" else "裸PCM"} 声道=2 采样率=48000")
+                DiagLog.i("协议", "已发送 AURL 包头：编码=${if (codec == 1) "Opus" else "裸PCM"} 声道=1 采样率=48000")
 
                 // 采样与编码缓冲
                 val bufferSize = 1024 * 4

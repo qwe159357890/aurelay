@@ -563,6 +563,12 @@ fun AurelayApp(
         }
     }
 
+    // 权限回调是被 remember 住的旧 lambda，直接捕获 clientIp 会拿到「点击前」的旧值
+    // （可能为空），服务就会收到空的 TARGET_IP 而启不来。用 rememberUpdatedState
+    // 包一层，保证回调触发时读到的是最新值。
+    val currentTargetIp by rememberUpdatedState(clientIp)
+    val currentOutputMode by rememberUpdatedState(audioOutputMode)
+
     val recordAudioPermissionLauncher = if (!isPreview) {
         rememberLauncherForActivityResult(
             contract = ActivityResultContracts.RequestPermission()
@@ -573,9 +579,9 @@ fun AurelayApp(
                 try {
                     val intent = Intent(context, AudioCaptureService::class.java).apply {
                         action = AudioCaptureService.ACTION_START
-                        putExtra(AudioCaptureService.EXTRA_TARGET_IP, clientIp)
+                        putExtra(AudioCaptureService.EXTRA_TARGET_IP, currentTargetIp)
                         putExtra(AudioCaptureService.EXTRA_TARGET_PORT, 5000)
-                        putExtra(AudioCaptureService.EXTRA_AUDIO_OUTPUT_MODE, audioOutputMode)
+                        putExtra(AudioCaptureService.EXTRA_AUDIO_OUTPUT_MODE, currentOutputMode)
                     }
                     ContextCompat.startForegroundService(context, intent)
                     isServiceRunning = true
