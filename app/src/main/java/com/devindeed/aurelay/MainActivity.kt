@@ -279,15 +279,14 @@ class MainActivity : ComponentActivity() {
 
         // Ensure the notification channel exists
         createNotificationChannel()
-        
-        // Check if auto-start is enabled in preferences
-        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-        val autoStart = prefs.getBoolean("auto_start_service", false)
-        
-        if (autoStart) {
-            val intent = Intent(this, AudioRelayService::class.java)
-            ContextCompat.startForegroundService(this, intent)
-        }
+
+        // ===== 常驻通知 + 保活（设计文档 8.3 第 4 项）=====
+        // 「点停止」只停音频会话、**不销毁服务**，通知随 App 运行全程常驻。
+        // 服务在才有前台通知，有前台通知才扛得住国产 ROM 的后台清理——
+        // 因此这里无条件拉起，不再受 auto_start_service 开关左右
+        // （该开关语义收窄为「开机自启」，见 BootReceiver）。
+        // 重复调用是幂等的：服务已在运行则只会再走一次 onStartCommand。
+        ContextCompat.startForegroundService(this, Intent(this, AudioRelayService::class.java))
         
         // Register broadcast receiver with proper flags for all Android versions
         val filter = IntentFilter().apply {
@@ -572,8 +571,9 @@ fun AurelayApp(
     
     // Get preferences
     val prefs = remember { PreferenceManager.getDefaultSharedPreferences(context) }
-    val autoStart = prefs.getBoolean(AppPrefs.KEY_AUTO_START, false)
     // 可视化条与音量滑块固定常驻显示（设置项已删除）
+    // 注：KEY_AUTO_START 现仅管「开机自启」（BootReceiver），
+    //     App 打开后的前台服务是无条件常驻的，不再受它控制。
     val showVisualizer = true
     val showVolumeSlider = true
     // 电脑放音的音频输出固定为「远端」：手机只当电脑的麦克风，不自播
@@ -581,7 +581,9 @@ fun AurelayApp(
 
     // --- STATE ---
     var isBroadcastMode by remember { mutableStateOf(false) } // Default: Receiver Mode
-    var isServiceRunning by remember { mutableStateOf(autoStart) } // Service state based on preference
+    // 常驻前台服务：onCreate 已无条件拉起接收服务（设计文档 8.3 第 4 项），
+    // 因此初值恒为 true。「停止」此后只停音频会话、不销毁服务，服务与通知全程在。
+    var isServiceRunning by remember { mutableStateOf(true) }
     var volume by remember { mutableFloatStateOf(0.8f) }
     var isMuted by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
@@ -846,26 +848,33 @@ fun AurelayApp(
                 contentAlignment = Alignment.Center
             ) {
                 androidx.compose.animation.AnimatedVisibility(visible = isClientConnected && !isBroadcastMode && showVisualizer) {
+                    // 本区内容合计约 300dp（可视化条 100 + 音量环 100 + 标签 + 滑块），
+                    // 而中间区在中小屏上往往只有 250dp 左右。过去这里没有 verticalScroll，
+                    // 超出约束的部分会溢出去被底部「停止推送」按钮盖住——
+                    // 用户看到的正是「音量滑块看不见了，被停止按钮遮挡」。
+                    // 这里补上滚动兜底，并把可视化条与音量环各压缩一档。
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
                     ) {
                         // Real Audio Visualizer
-                        RealAudioVisualizer(audioLevels = audioLevels)
+                        RealAudioVisualizer(audioLevels = audioLevels, heightDp = 100f)
 
-                        Spacer(Modifier.height(12.dp))
+                        Spacer(Modifier.height(8.dp))
 
                         // 音量环（仿 MicYou 的 VolumeRing）：整体音量取各频段平均值，
                         // 比单取峰值平稳，环的填充不会一跳一跳
                         val overallLevel = if (audioLevels.isEmpty()) 0f
                         else audioLevels.average().toFloat().coerceIn(0f, 1f)
                         VolumeRingVisualizer(
-                            modifier = Modifier.size(120.dp),
+                            modifier = Modifier.size(100.dp),
                             audioLevel = overallLevel,
                             color = MaterialTheme.colorScheme.primary
                         )
 
-                        Spacer(Modifier.height(24.dp))
+                        Spacer(Modifier.height(12.dp))
                         // Volume Slider - conditionally shown
                         if (showVolumeSlider) {
                             Text(
@@ -2198,7 +2207,7 @@ fun VolumeRingVisualizer(
 
 // A real visualizer component that responds to actual audio data
 @Composable
-fun RealAudioVisualizer(audioLevels: FloatArray) {
+fun RealAudioVisualizer(audioLevels: FloatArray, heightDp: Float = 140f) {
     val brush = Brush.verticalGradient(
         listOf(
             MaterialTheme.colorScheme.primary,
@@ -2221,7 +2230,7 @@ fun RealAudioVisualizer(audioLevels: FloatArray) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(140.dp)
+            .height(heightDp.dp)
             .padding(horizontal = 8.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically
@@ -2232,7 +2241,7 @@ fun RealAudioVisualizer(audioLevels: FloatArray) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
-                modifier = Modifier.height(140.dp)
+                modifier = Modifier.height(heightDp.dp)
             ) {
                 // Top bar (grows upward)
                 Box(

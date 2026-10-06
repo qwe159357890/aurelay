@@ -70,6 +70,11 @@ class AudioRelayService : Service() {
         const val ACTION_STOP_SERVICE = "com.devindeed.aurelay.STOP_SERVICE"
         const val ACTION_OPEN_APP = "com.devindeed.aurelay.OPEN_APP"
 
+        // 常驻前台通知的通知 ID（设计文档 8.3 第 4 项：App 运行全程常驻）。
+        // 原先 onCreate 里硬编码写 1，会话停止后要刷新通知就必须能复用到同一个 ID，
+        // 否则会再贴出第二条通知，因此提为常量。
+        const val NOTIFICATION_ID = 1001
+
         // 音频接收端口（地址上报时会一并告知 PC 发送端）
         const val AUDIO_PORT = 5000
 
@@ -137,7 +142,7 @@ class AudioRelayService : Service() {
         mediaSession = MediaSessionCompat(this, "AudioRelay")
         notificationManager = NotificationManagerCompat.from(this)
         createNotificationChannel()
-        startForeground(1, buildNotification())
+        startForeground(NOTIFICATION_ID, buildNotification())
         // UDP 广播发现已整体删除：电脑端改从中心服务器查询本机地址
         // 启动地址上报（把本机地址同步到用户自己的中心服务器，供电脑端发现）
         AddressReporter.start(this)
@@ -211,6 +216,56 @@ class AudioRelayService : Service() {
         }
         relayThread?.interrupt()
         relayThread = null
+    }
+
+    /**
+     * 停止当前音频会话（**不销毁服务**，前台通知保持常驻）
+     *
+     * 与设计文档 8.3 第 4 项一致：用户点「停止」只结束这一次音频会话，
+     * 服务与前台通知继续存活以维持保活。旧实现直接 stopSelf()，
+     * 通知一消失，国产 ROM 下一次后台清理就把进程收走，
+     * 典型后果是「手机停了上报，PC 端随之查不到设备」。
+     *
+     * :return: 无返回值
+     */
+    private fun stopAudioSession() {
+        DiagLog.i("服务", "收到停止指令：仅结束音频会话，服务与通知保持常驻")
+        // 会话级停止按禁令 #3：**只 pause + flush，绝不 release**——
+        // release 过的音轨状态是 STATE_UNINITIALIZED，下次复用会在
+        // AudioTrack.stop()/flush() 的 precondition 检查上抛 IllegalStateException。
+        try {
+            audioTrack?.pause()
+            audioTrack?.flush()
+        } catch (e: Exception) {
+            DiagLog.w("服务", "暂停音轨失败：${e.message}")
+        }
+        // 清掉对端信息，让通知与界面回到「等待」
+        lastClientIp = ""
+        lastClientName = ""
+        try {
+            val bcast = Intent("com.devindeed.aurelay.CLIENT_CONNECTION")
+            bcast.setPackage(packageName)
+            bcast.putExtra("connected", false)
+            bcast.putExtra("client_ip", "")
+            sendBroadcast(bcast)
+        } catch (e: Exception) {
+            DiagLog.w("服务", "广播断开状态失败：${e.message}")
+        }
+        // 常驻通知的文案同步回「等待接收音频」
+        refreshNotification()
+    }
+
+    /**
+     * 用当前状态重建并重新张贴前台通知
+     *
+     * 会话开始/结束都要调用一次，保证常驻通知上的文案与实际状态一致。
+     *
+     * :return: 无返回值
+     */
+    private fun refreshNotification() {
+        // 直接复用 notifyConnected：它已经带好了 POST_NOTIFICATIONS 权限检查，
+        // 不另写一套，避免两处检查逻辑将来走偏。
+        notifyConnected()
     }
 
     /**
@@ -298,9 +353,12 @@ class AudioRelayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP_SERVICE -> {
-                Log.d("AudioRelay", "Stopping service from notification action")
-                stopSelf()
-                return START_NOT_STICKY
+                // 设计文档 8.3 第 4 项：通知常驻后，「停止」**只停音频会话**，
+                // 不能 stopSelf()——服务一销毁通知就消失，保活前台也就没了，
+                // 国产 ROM 下一次清理就把进程收走（表现为「地址上报停了，PC 查不到」）。
+                Log.d("AudioRelay", "Stopping audio session, service stays alive for keep-alive")
+                stopAudioSession()
+                return START_STICKY
             }
             ACTION_SET_VOLUME -> {
                 val volume = intent.getFloatExtra(EXTRA_VOLUME, 0.8f)
@@ -344,11 +402,12 @@ class AudioRelayService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // Get sender device name (if connected) or show "Ready to receive"
+        // 常驻通知：不论当前有没有会话都要写明「后台还在跑」，
+        // 否则用户会以为点过停止之后 App 已经彻底关了。
         val displayText = if (lastClientName.isNotEmpty()) {
             "正在接收来自 $lastClientName 的音频"
         } else {
-            "等待接收音频"
+            "后台常驻运行 · 等待接收音频"
         }
 
         val builder =
@@ -635,7 +694,7 @@ class AudioRelayService : Service() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
             @SuppressLint("MissingPermission")
-            notificationManager.notify(1, buildNotification())
+            notificationManager.notify(NOTIFICATION_ID, buildNotification())
         } else {
             Log.w("AudioRelay", "Missing POST_NOTIFICATIONS permission; skipping notification update")
         }
