@@ -820,84 +820,148 @@ fun AurelayApp(
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
                                 if (!isBroadcastMode) {
+                                    // 手机放音：按网络类型显示「地址上报」或「中转连接」卡
+                                    val netType = NetworkWatcher.detect(context)
+                                    val isWifiNet = netType == NetworkWatcher.NetType.WIFI
+                                    // 每秒刷新一次，让「最近上报」与倒计时真正走动
+                                    var tick by remember { mutableStateOf(0) }
+                                    LaunchedEffect(Unit) {
+                                        while (true) {
+                                            tick++
+                                            kotlinx.coroutines.delay(1000)
+                                        }
+                                    }
+                                    val lastAt = remember(tick) { prefs.getLong(AddressReporter.KEY_LAST_TIME, 0L) }
+                                    val elapsedMs = if (lastAt > 0L) System.currentTimeMillis() - lastAt else -1L
+                                    val agoText = if (elapsedMs < 0L) "尚未上报"
+                                        else if (elapsedMs < 3000L) "刚刚"
+                                        else if (elapsedMs < 60_000L) "${elapsedMs / 1000} 秒前"
+                                        else "${elapsedMs / 60_000} 分钟前"
+                                    val remaining = if (elapsedMs < 0L) 0L
+                                        else (60_000L - (elapsedMs % 60_000L)) / 1000L
+
                                     Text(
-                                        "连接信息",
+                                        if (isWifiNet) "地址上报" else "中转连接",
                                         style = MaterialTheme.typography.titleMedium,
                                         fontWeight = FontWeight.SemiBold,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
-                                    
+
                                     Spacer(Modifier.height(16.dp))
-                                    
                                     HorizontalDivider(
                                         modifier = Modifier.fillMaxWidth(0.3f),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
                                     )
-                                    
-                                    Spacer(Modifier.height(20.dp))
+                                    Spacer(Modifier.height(18.dp))
 
-                                    Text(
-                                        "设备 IP 地址",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        letterSpacing = 0.5.sp
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(
-                                        deviceIp,
-                                        style = MaterialTheme.typography.headlineMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
+                                    if (isWifiNet) {
+                                        // WiFi：把本机地址同步给中心服务器，电脑端查到后直接连
+                                        Row(modifier = Modifier.fillMaxWidth()) {
+                                            Text(
+                                                "本机地址",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Text(
+                                                deviceIp,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        Spacer(Modifier.height(10.dp))
+                                        Row(modifier = Modifier.fillMaxWidth()) {
+                                            Text(
+                                                "端口",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Text(
+                                                port,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        Spacer(Modifier.height(10.dp))
+                                        Row(modifier = Modifier.fillMaxWidth()) {
+                                            Text(
+                                                "最近上报",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Text(
+                                                agoText,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Medium,
+                                                color = MaterialTheme.colorScheme.tertiary
+                                            )
+                                        }
+                                        Spacer(Modifier.height(8.dp))
+                                        Text(
+                                            "下次上报 ${remaining} 秒后",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.fillMaxWidth(),
+                                            textAlign = androidx.compose.ui.text.style.TextAlign.End
+                                        )
+                                    } else {
+                                        // 蜂窝：不开本地服务，主动出站长连接中转服务器
+                                        val relayServer = prefs.getString(
+                                            AppPrefs.KEY_RELAY_SERVER, AppPrefs.DEFAULT_RELAY_SERVER
+                                        ) ?: AppPrefs.DEFAULT_RELAY_SERVER
+                                        Row(modifier = Modifier.fillMaxWidth()) {
+                                            Text(
+                                                "中转服务器",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Text(
+                                                relayServer,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.tertiary
+                                            )
+                                        }
+                                        Spacer(Modifier.height(10.dp))
+                                        Row(modifier = Modifier.fillMaxWidth()) {
+                                            Text(
+                                                "心跳",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Text(
+                                                if (isClientConnected) "正常 · 刚刚" else "等待连接",
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Medium,
+                                                color = MaterialTheme.colorScheme.tertiary
+                                            )
+                                        }
+                                    }
 
-                                    Spacer(Modifier.height(20.dp))
-
-                                    Text(
-                                        "端口",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        letterSpacing = 0.5.sp
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(
-                                        port,
-                                        style = MaterialTheme.typography.headlineMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-
-                                    Spacer(Modifier.height(20.dp))
-
-                                    Text(
-                                        "本机 IPv6（公网连接用）",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        letterSpacing = 0.5.sp
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(
-                                        localAddresses.second.firstOrNull() ?: "暂无可用 IPv6",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Medium,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-
-                                    Spacer(Modifier.height(20.dp))
-
+                                    Spacer(Modifier.height(18.dp))
                                     HorizontalDivider(
                                         modifier = Modifier.fillMaxWidth(0.3f),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
                                     )
-                                    
                                     Spacer(Modifier.height(14.dp))
 
                                     Text(
-                                        if (isBroadcastMode) "在另一台设备上连接即可听到声音" else "使用以下信息进行连接",
+                                        if (isWifiNet)
+                                            "电脑端会从中心服务器查到本机地址，直接连接，无需手动填写"
+                                        else
+                                            "蜂窝无法被公网入站，声音经服务器转发；蜂窝下不上报地址",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.padding(horizontal = 12.dp),
                                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                                     )
+
                                 } else {
                                         // 电脑放音：手动维护的电脑列表（UDP 广播发现已整体删除）
                                         val deviceList = remember { mutableStateListOf<DeviceStore.Device>().apply { addAll(DeviceStore.list(context)) } }

@@ -42,6 +42,9 @@ object AddressReporter {
     const val KEY_DEVICE_ID = "report_device_id"
     const val KEY_LAST_RESULT = "report_last_result"
 
+    // 最近一次成功/尝试上报的时间戳（界面据此显示「N 秒前」并实时走动）
+    const val KEY_LAST_TIME = "report_last_time"
+
     // 周期上报间隔：60 秒
     private const val REPORT_INTERVAL_MS = 60_000L
 
@@ -205,7 +208,10 @@ object AddressReporter {
     private fun saveResult(prefs: SharedPreferences, result: String) {
         val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
             .format(java.util.Date())
-        prefs.edit().putString(KEY_LAST_RESULT, "$result（$time）").apply()
+        prefs.edit()
+            .putString(KEY_LAST_RESULT, "$result（$time）")
+            .putLong(KEY_LAST_TIME, System.currentTimeMillis())
+            .apply()
     }
 
     // 读取响应体文本（读取失败返回空串，不影响结果判定）
