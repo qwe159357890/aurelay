@@ -1036,7 +1036,7 @@ fun AurelayApp(
                                                                 tint = MaterialTheme.colorScheme.primary,
                                                                 modifier = Modifier.size(24.dp)
                                                             )
-                                                            Spacer(Modifier.width(10.dp))
+                                                            Spacer(Modifier.width(8.dp))
                                                             Column(
                                                                 modifier = Modifier.weight(1f)
                                                             ) {
@@ -1047,16 +1047,9 @@ fun AurelayApp(
                                                                     maxLines = 1,
                                                                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                                                 )
-                                                                Text(
-                                                                    "${device.ip}:${device.port}",
-                                                                    style = MaterialTheme.typography.bodySmall,
-                                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                                    maxLines = 1,
-                                                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                                                                )
                                                             }
                                                         }
-                                                        Spacer(Modifier.width(6.dp))
+                                                        Spacer(Modifier.width(2.dp))
                                                         IconButton(onClick = { openEditor(index) }) {
                                                             Icon(
                                                                 imageVector = Icons.Rounded.Settings,
@@ -1083,8 +1076,14 @@ fun AurelayApp(
                                                                 onClientIpSelected("")
                                                                 connectingToIp = ""
                                                             } else {
+                                                                // 选中这台电脑，并**直接开始推流**——
+                                                                // 原来这里只记录选中项却不启动服务，
+                                                                // 结果按钮一直停在「连接中」、还得再点一次「开始」
                                                                 onClientIpSelected(device.ip)
                                                                 connectingToIp = device.ip
+                                                                recordAudioPermissionLauncher?.launch(
+                                                                    android.Manifest.permission.RECORD_AUDIO
+                                                                )
                                                             }
                                                         }) {
                                                             Text(
