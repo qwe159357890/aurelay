@@ -13,6 +13,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.view.WindowCompat
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -24,11 +25,16 @@ import androidx.compose.foundation.clickable
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalInspectionMode
@@ -36,6 +42,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.cos
+import kotlin.math.min
+import kotlin.math.sin
 import kotlin.random.Random
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Headphones
@@ -93,6 +102,8 @@ class MainActivity : ComponentActivity() {
     var captureStateSeq by mutableStateOf(0)
     var captureStateValue by mutableStateOf("")
     var captureStateReason by mutableStateOf("")
+    // 电脑放音时的实时音量（0~1 归一化 RMS），由采集服务广播驱动音量环
+    var captureLevel by mutableFloatStateOf(0f)
     private var pendingConnectionRequest by mutableStateOf<Pair<String, String>?>(null) // IP, Name
     
     companion object {
@@ -217,6 +228,13 @@ class MainActivity : ComponentActivity() {
                     captureStateReason = reason
                     captureStateSeq++
                 }
+
+                // 采集服务实时回报音量：驱动电脑放音模式的音量环
+                AudioCaptureService.ACTION_CAPTURE_LEVEL -> {
+                    captureLevel = intent.getFloatExtra(
+                        AudioCaptureService.EXTRA_CAPTURE_LEVEL, 0f
+                    ).coerceIn(0f, 1f)
+                }
                 ACTION_CONNECTION_REQUEST -> {
                     val ip = intent.getStringExtra("client_ip") ?: ""
                     val name = intent.getStringExtra("client_name") ?: "未知设备"
@@ -277,6 +295,7 @@ class MainActivity : ComponentActivity() {
             addAction(ACTION_CONNECTION_REQUEST)
             addAction(AudioRelayService.ACTION_AUDIO_LEVEL)
             addAction(AudioCaptureService.ACTION_CAPTURE_STATE)
+            addAction(AudioCaptureService.ACTION_CAPTURE_LEVEL)
         }
         // Use ContextCompat.registerReceiver with explicit non-exported flag to satisfy Android U+ requirements
         ContextCompat.registerReceiver(this, connectionReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -833,7 +852,20 @@ fun AurelayApp(
                     ) {
                         // Real Audio Visualizer
                         RealAudioVisualizer(audioLevels = audioLevels)
-                        Spacer(Modifier.height(32.dp))
+
+                        Spacer(Modifier.height(12.dp))
+
+                        // 音量环（仿 MicYou 的 VolumeRing）：整体音量取各频段平均值，
+                        // 比单取峰值平稳，环的填充不会一跳一跳
+                        val overallLevel = if (audioLevels.isEmpty()) 0f
+                        else audioLevels.average().toFloat().coerceIn(0f, 1f)
+                        VolumeRingVisualizer(
+                            modifier = Modifier.size(120.dp),
+                            audioLevel = overallLevel,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+
+                        Spacer(Modifier.height(24.dp))
                         // Volume Slider - conditionally shown
                         if (showVolumeSlider) {
                             Text(
@@ -869,6 +901,17 @@ fun AurelayApp(
                             .verticalScroll(rememberScrollState())
                             .padding(horizontal = 10.dp, vertical = 16.dp)
                     ) {
+                        // 电脑放音正在推送时：显示音量环（仿 MicYou），
+                        // 让「麦克风到底有没有收进声音」一眼可见
+                        if (isBroadcastMode && isServiceRunning) {
+                            VolumeRingVisualizer(
+                                modifier = Modifier.size(120.dp),
+                                audioLevel = captureLevel,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.height(12.dp))
+                        }
+
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -2010,6 +2053,145 @@ fun AurelayApp(
             containerColor = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(20.dp)
         )
+    }
+}
+
+// 音量环的绘制常量（数值仿 MicYou 的 VisualizerConstants，保持观感一致）
+private object VolumeRingConstants {
+    // 基础半径占可用空间的比例
+    const val BASE_RADIUS_FACTOR = 0.85f
+    // 圆环线宽（dp）
+    const val STROKE_WIDTH_DP = 8
+    // 刻度总数
+    const val TICK_COUNT = 60
+    // 每隔多少个刻度画一个长刻度
+    const val MAJOR_TICK_INTERVAL = 5
+    // 长/短刻度长度（dp）
+    const val MAJOR_TICK_LENGTH_DP = 6
+    const val MINOR_TICK_LENGTH_DP = 3
+    // 内发光半径系数（乘以当前音量）
+    const val INNER_GLOW_RADIUS_FACTOR = 0.6f
+    // 音量变化动画时长（毫秒）
+    const val ANIM_DURATION_LEVEL_UPDATE = 100
+    // 各元素透明度
+    const val ALPHA_BACKGROUND_RING = 0.15f
+    const val ALPHA_END_DOT = 0.9f
+    const val ALPHA_TICK_ACTIVE = 0.4f
+    const val ALPHA_TICK_INACTIVE = 0.1f
+    const val ALPHA_INNER_GLOW = 0.15f
+}
+
+/**
+ * 音量环可视化：圆环进度 + 外圈刻度 + 端点圆点 + 中心内发光
+ *
+ * 样式仿 MicYou 的 `VolumeRingVisualizer`：从 12 点方向顺时针填充圆弧，
+ * 圆弧端点带一个高亮圆点，外侧一圈刻度按当前音量点亮，中心随音量泛光。
+ *
+ * @param audioLevel 当前音量，取值 0~1（超出会自动夹取）
+ * @param color 环与刻度的基础颜色
+ */
+@Composable
+fun VolumeRingVisualizer(
+    modifier: Modifier = Modifier,
+    audioLevel: Float,
+    color: Color
+) {
+    // 音量动画：100ms 线性过渡，跟上采集端约 20ms 一帧的刷新节奏
+    val animatedLevel by animateFloatAsState(
+        targetValue = audioLevel.coerceIn(0f, 1f),
+        animationSpec = tween(
+            durationMillis = VolumeRingConstants.ANIM_DURATION_LEVEL_UPDATE,
+            easing = LinearEasing
+        ),
+        label = "VolumeRingLevel"
+    )
+
+    Canvas(modifier = modifier) {
+        val center = Offset(size.width / 2, size.height / 2)
+        val baseRadius = min(size.width, size.height) / 2 *
+            VolumeRingConstants.BASE_RADIUS_FACTOR
+        val strokeWidth = VolumeRingConstants.STROKE_WIDTH_DP.dp.toPx()
+
+        // 底色圆环
+        drawCircle(
+            color = color.copy(alpha = VolumeRingConstants.ALPHA_BACKGROUND_RING),
+            radius = baseRadius,
+            center = center,
+            style = Stroke(width = strokeWidth)
+        )
+
+        // 音量圆弧：从 12 点方向起，顺时针填充
+        val sweepAngle = 360f * animatedLevel
+        val startAngle = -90f
+        drawArc(
+            color = color,
+            startAngle = startAngle,
+            sweepAngle = sweepAngle,
+            useCenter = false,
+            topLeft = Offset(center.x - baseRadius, center.y - baseRadius),
+            size = Size(baseRadius * 2, baseRadius * 2),
+            style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+        )
+
+        // 圆弧末端的圆点（音量很小时不画，避免小圆点突兀）
+        if (animatedLevel > 0.05f) {
+            val endAngleRad = Math.toRadians((startAngle + sweepAngle).toDouble()).toFloat()
+            drawCircle(
+                color = color.copy(alpha = VolumeRingConstants.ALPHA_END_DOT),
+                radius = strokeWidth * 0.8f,
+                center = Offset(
+                    center.x + baseRadius * cos(endAngleRad),
+                    center.y + baseRadius * sin(endAngleRad)
+                )
+            )
+        }
+
+        // 外圈刻度：已点亮的用较高透明度，未点亮的偏暗
+        for (i in 0 until VolumeRingConstants.TICK_COUNT) {
+            val tickAngle =
+                -90f + (i.toFloat() / VolumeRingConstants.TICK_COUNT) * 360f
+            val tickAngleRad = Math.toRadians(tickAngle.toDouble()).toFloat()
+            val tickProgress = i.toFloat() / VolumeRingConstants.TICK_COUNT
+
+            val innerRadius = baseRadius - strokeWidth * 0.5f
+            val outerRadius = baseRadius + strokeWidth * 0.5f
+            val isMajor = i % VolumeRingConstants.MAJOR_TICK_INTERVAL == 0
+
+            val tickAlpha = if (tickProgress <= animatedLevel)
+                VolumeRingConstants.ALPHA_TICK_ACTIVE
+            else
+                VolumeRingConstants.ALPHA_TICK_INACTIVE
+            val tickLength = if (isMajor)
+                VolumeRingConstants.MAJOR_TICK_LENGTH_DP.dp.toPx()
+            else
+                VolumeRingConstants.MINOR_TICK_LENGTH_DP.dp.toPx()
+
+            drawLine(
+                color = color.copy(alpha = tickAlpha),
+                start = Offset(
+                    center.x + innerRadius * cos(tickAngleRad),
+                    center.y + innerRadius * sin(tickAngleRad)
+                ),
+                end = Offset(
+                    center.x + (outerRadius + tickLength) * cos(tickAngleRad),
+                    center.y + (outerRadius + tickLength) * sin(tickAngleRad)
+                ),
+                strokeWidth = if (isMajor) 2.dp.toPx() else 1.dp.toPx()
+            )
+        }
+
+        // 中心内发光：半径与透明度都随音量变化
+        val glowRadius = baseRadius *
+            VolumeRingConstants.INNER_GLOW_RADIUS_FACTOR * animatedLevel
+        if (glowRadius > 0) {
+            drawCircle(
+                color = color.copy(
+                    alpha = VolumeRingConstants.ALPHA_INNER_GLOW * animatedLevel
+                ),
+                radius = glowRadius,
+                center = center
+            )
+        }
     }
 }
 

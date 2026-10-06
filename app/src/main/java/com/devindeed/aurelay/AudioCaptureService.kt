@@ -1,6 +1,7 @@
 package com.devindeed.aurelay
 
 import android.app.Notification
+import android.app.PendingIntent
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -62,6 +63,19 @@ class AudioCaptureService : Service() {
         const val EXTRA_CAPTURE_STATE = "capture_state"   // connected / failed / stopped
         const val EXTRA_CAPTURE_REASON = "capture_reason" // failed 时的原因
         const val EXTRA_CAPTURE_IP = "capture_ip"
+
+        // 电脑放音时的实时音量广播（供界面音量环显示）：0~1 的归一化 RMS
+        const val ACTION_CAPTURE_LEVEL = "com.devindeed.aurelay.CAPTURE_LEVEL"
+        const val EXTRA_CAPTURE_LEVEL = "capture_level"
+    }
+
+    // 广播当前音量（0~1），供界面的音量环实时反映麦克风输入
+    private fun reportLevel(level: Float) {
+        val intent = Intent(ACTION_CAPTURE_LEVEL).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_CAPTURE_LEVEL, level)
+        }
+        sendBroadcast(intent)
     }
 
     // 把推流状态如实回传给界面（连上才叫「正在广播」）
@@ -398,13 +412,25 @@ class AudioCaptureService : Service() {
                         // 统计本批采样峰值：用来判定「麦克风到底有没有采到声音」。
                         // 电脑端解码后 RMS=0，必须先分清是采集静音还是编解码静音。
                         var p = 0
+                        var squareSum = 0.0
+                        var sampleCount = 0
                         while (p + 1 < read) {
                             val raw = ((buffer[p + 1].toInt() and 0xFF) shl 8) or
                                 (buffer[p].toInt() and 0xFF)
                             val signed = if (raw >= 32768) raw - 65536 else raw
                             val abs = if (signed < 0) -signed else signed
                             if (abs > batchPeak) batchPeak = abs
+                            // 归一化到 -1~1 后累加平方，用于算 RMS（与 MicYou 算法一致）
+                            val normalized = signed / 32768.0
+                            squareSum += normalized * normalized
+                            sampleCount++
                             p += 2
+                        }
+                        // 每批采样广播一次音量，界面音量环据此实时跳动
+                        if (sampleCount > 0) {
+                            val rms = kotlin.math.sqrt(squareSum / sampleCount)
+                                .toFloat().coerceIn(0f, 1f)
+                            reportLevel(rms)
                         }
                         try {
                             // Also play locally if both_devices mode
@@ -540,12 +566,33 @@ class AudioCaptureService : Service() {
         }
     }
 
+    /**
+     * 构建前台服务通知
+     *
+     * 样式仿 MicYou 的 AudioService.createNotification()：低优先级、常驻不可滑走、
+     * 只提醒一次、不显示时间戳，**点击通知即停止推送**（MicYou 是点击断开连接）。
+     * 差异仅在图标（用 Aurelay 自己的 ic_launcher）与名称（Aurelay）。
+     *
+     * :return: 构建好的通知对象
+     */
     private fun createNotification(): Notification {
+        // 点击通知 = 停止推送（与 MicYou「点击断开」同逻辑）
+        val stopIntent = Intent(this, AudioCaptureService::class.java).apply {
+            action = ACTION_STOP
+        }
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+            (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+        val contentIntent = PendingIntent.getService(this, 0, stopIntent, flags)
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("音频采集")
-            .setContentText("正在采集麦克风声音并推送到电脑…")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentTitle("Aurelay 正在推送")
+            .setContentText("点击停止推送麦克风声音")
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+            .setContentIntent(contentIntent)
             .build()
     }
 }

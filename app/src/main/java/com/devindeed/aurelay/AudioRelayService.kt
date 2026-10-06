@@ -351,7 +351,12 @@ class AudioRelayService : Service() {
             NotificationCompat.Builder(this, "audioRelayChannel")
                 .setContentTitle("Aurelay 声音中继")
                 .setContentText(displayText)
-                .setSmallIcon(android.R.drawable.ic_media_play)
+                // 图标统一用 Aurelay 自己的启动图标；其余风格与采集端一致
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
                 .setContentIntent(openAppPendingIntent)
                 .addAction(
                     android.R.drawable.ic_menu_close_clear_cancel,
@@ -1137,6 +1142,18 @@ class AudioRelayService : Service() {
             Log.e("AudioRelay", "Error closing server socket on destroy.", e)
         }
         serverThread?.interrupt() // Interrupt the thread
+        // 停止出声：服务销毁时必须彻底释放音轨，否则会「点了停止还在响」
+        // （会话级只用 pause+flush，见禁令 #3；这里是服务销毁，可以 release）
+        try {
+            audioTrack?.pause()
+            audioTrack?.flush()
+            audioTrack?.release()
+        } catch (e: Exception) {
+            Log.w("AudioRelay", "Error releasing AudioTrack on destroy.", e)
+        }
+        audioTrack = null
+        currentSampleRate = 0
+        currentOutChannels = 0
         // 停止中转链路
         stopRelayLink()
         // 释放全程保活资源与两个独立锚点
