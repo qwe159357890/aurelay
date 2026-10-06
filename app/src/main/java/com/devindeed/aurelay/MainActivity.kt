@@ -335,66 +335,28 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Send a small UDP connect notification to the selected receiver so it can update its UI
+    // UDP 广播发现已整体删除：连接请求改为「直接按用户手填的地址连接」，无需再广播
     private fun sendConnectRequest(targetIp: String) {
-        Thread {
-            var sock: DatagramSocket? = null
-            try {
-                sock = DatagramSocket()
-                val deviceName = getDeviceName()
-                val msg = "${AudioRelayService.CONNECT_REQUEST};$deviceName".toByteArray()
-                val packet = DatagramPacket(msg, msg.size, InetAddress.getByName(targetIp), AudioRelayService.DISCOVERY_PORT)
-                sock.send(packet)
-                Log.d("MainActivity", "Sent CONNECT to $targetIp with device name: $deviceName")
-            } catch (e: Exception) {
-                Log.e("MainActivity", "Failed to send connect request: ${e.message}")
-            } finally {
-                try { sock?.close() } catch (e: Exception) {}
-            }
-        }.start()
+        Log.d("MainActivity", "开始连接 $targetIp（UDP 广播已移除，直接 TCP 连接）")
+        DiagLog.i("连接", "开始连接电脑 $targetIp（手动地址，不经 UDP 发现）")
     }
 
+    // UDP 广播发现已整体删除：断开只影响本地状态，不再广播
     private fun sendDisconnectRequest(targetIp: String) {
-        Thread {
-            var sock: DatagramSocket? = null
-            try {
-                sock = DatagramSocket()
-                val msg = AudioRelayService.DISCONNECT_REQUEST.toByteArray()
-                val packet = DatagramPacket(msg, msg.size, InetAddress.getByName(targetIp), AudioRelayService.DISCOVERY_PORT)
-                sock.send(packet)
-                Log.d("MainActivity", "Sent DISCONNECT to $targetIp")
-            } catch (e: Exception) {
-                Log.e("MainActivity", "Failed to send disconnect request: ${e.message}")
-            } finally {
-                try { sock?.close() } catch (e: Exception) {}
-            }
-        }.start()
+        Log.d("MainActivity", "已断开 $targetIp（UDP 广播已移除）")
+        DiagLog.i("连接", "已断开电脑 $targetIp")
     }
-    
+
+    // 连接确认：固定「不需要确认」，这里只同步本地 UI 状态（UDP 通知已移除）
     private fun sendConnectionResponse(targetIp: String, approved: Boolean) {
-        Thread {
-            var sock: DatagramSocket? = null
-            try {
-                sock = DatagramSocket()
-                val msg = if (approved) "AURELAY_ACCEPT" else "AURELAY_REJECT"
-                val packet = DatagramPacket(msg.toByteArray(), msg.length, InetAddress.getByName(targetIp), AudioRelayService.DISCOVERY_PORT)
-                sock.send(packet)
-                Log.d("MainActivity", "Sent connection response: $msg to $targetIp")
-                
-                // Update local UI state if accepted (receiver side)
-                if (approved) {
-                    runOnUiThread {
-                        connectionState = true
-                        clientIpState = targetIp
-                        Log.d("MainActivity", "Receiver: Updated local connection state to connected with $targetIp")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e("MainActivity", "Failed to send connection response: ${e.message}")
-            } finally {
-                try { sock?.close() } catch (e: Exception) {}
+        Log.d("MainActivity", "连接响应：target=$targetIp approved=$approved（UDP 通知已移除）")
+        if (approved) {
+            runOnUiThread {
+                connectionState = true
+                clientIpState = targetIp
+                Log.d("MainActivity", "已更新本地连接状态：connected with $targetIp")
             }
-        }.start()
+        }
     }
     
     override fun onDestroy() {
@@ -1021,7 +983,7 @@ fun AurelayApp(
                                                             verticalAlignment = Alignment.CenterVertically
                                                         ) {
                                                             Icon(
-                                                                imageVector = Icons.Rounded.Computer,
+                                                                imageVector = Icons.Rounded.Headphones,
                                                                 contentDescription = null,
                                                                 tint = MaterialTheme.colorScheme.primary,
                                                                 modifier = Modifier.size(24.dp)
@@ -1044,7 +1006,7 @@ fun AurelayApp(
                                                         Spacer(Modifier.width(6.dp))
                                                         IconButton(onClick = { openEditor(index) }) {
                                                             Icon(
-                                                                imageVector = Icons.Rounded.Edit,
+                                                                imageVector = Icons.Rounded.Settings,
                                                                 contentDescription = "编辑",
                                                                 modifier = Modifier.size(18.dp)
                                                             )
@@ -1054,7 +1016,7 @@ fun AurelayApp(
                                                             reloadDevices()
                                                         }) {
                                                             Icon(
-                                                                imageVector = Icons.Rounded.Delete,
+                                                                imageVector = Icons.Rounded.LinkOff,
                                                                 contentDescription = "删除",
                                                                 modifier = Modifier.size(18.dp)
                                                             )

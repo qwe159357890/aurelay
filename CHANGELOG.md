@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.0] - 2026-10-06
+
+### Added
+- **服务器中转链路（蜂窝网络可用）**：蜂窝下手机没有公网入站能力，无法被动等待电脑连接；
+  现改为手机**主动出站**连到中转服务器（默认 `039039.xyz:15152`），PC 同样出站，
+  由服务器把 AURL 音频字节**原样转发**（不解包、不转码、不落盘）。
+  新增 `RelayProtocol.kt` / `RelayClient.kt`（ARLY 帧、握手、30 秒心跳、退避重连）。
+- **链路自动选择**：WiFi 走局域网直连（监听 `:5000`），蜂窝走服务器中转；
+  网络切换时自动切换，无需用户干预（新增 `NetworkWatcher.kt`）。
+- **全程保活**：新增「全程保活」开关（默认开），App 运行即持有 20 项受控资源
+  （唤醒锁、WiFi 锁、前台服务、AlarmManager / JobScheduler 兜底、中转长连接、
+  本地监听、上报定时器、网络回调、位置 / 传感器 / 蓝牙 / 相机监听等）。
+  新增 `ResourceHolder.kt`、`BootReceiver.kt`、`KeepAliveReceiver.kt`、`KeepAliveJobService.kt`。
+- **两个独立保活锚点**：
+  「一像素锚点」（默认开）——常驻 1×1、`alpha 0.01` 的悬浮窗，提升进程优先级；
+  「无声播放」（默认开）——空闲时用独立 AudioTrack 循环播放 ±1 LSB 的近静音 PCM，
+  播放声音或录音时自动让位。新增 `OnePixelOverlay.kt`、`SilentPlayer.kt`。
+- **电脑放音改为手动 IPv4 连接**：新增「我的电脑」列表（最多 10 条，可增改删），
+  新增 `DeviceStore.kt`；保存即入列表。
+- **电脑放音改推 Opus**：裸 PCM 691MB/小时 → Opus 128kbps 约 57MB/小时（11:1）。
+  新增 `OpusEncoder.kt`（48kHz / 立体声 / 20ms / 128kbps），
+  帧格式与 PC 端现推流逐字节一致；设备无 Opus 编码器时显式回退裸 PCM。
+- **全量权限申请**：按「能申请的都申请」要求，Manifest 声明危险权限、普通权限、
+  特殊权限与签名级权限共 100+ 项；运行时批量申请，任何一条被拒都不阻断主流程。
+- 开机自启动（`BootReceiver` 接收 `BOOT_COMPLETED`，受「自动启动服务」开关控制）。
+
+### Removed
+- **彻底移除 UDP**：删除 5002 端口的广播发现与应答（`DISCOVERY_REQUEST/RESPONSE`、
+  `CONNECT_REQUEST`、`DISCONNECT_REQUEST`），删除 `MainActivity` 的三个 UDP 通知函数。
+  电脑端改从中心服务器查询手机地址。
+- 删除设置项：连接需要确认（固定不确认）、应用主题（固定浅色）、动态取色（固定关）、
+  显示音频可视化（固定常驻）、显示音量滑块（固定常驻）、音频输出（固定「远端」）；
+  删除「关于」对话框（右上角齿轮直接进设置）。
+- 删除 `AudioRelayService` 的 `android:permission="TODO"`，`exported` 改为 `false`。
+
+### Changed
+- 术语改为「手机放音 / 电脑放音」（原「接收端 / 发送端」）。
+- 地址上报：蜂窝网络**不上报**（此时走中转），仅 WiFi 上报。
+- 设置页精简为「连接 / 本机」两组 + 地址上报 + 诊断日志。
+
 ## [v1.4.5] - 2026-10-01
 
 ### Fixed

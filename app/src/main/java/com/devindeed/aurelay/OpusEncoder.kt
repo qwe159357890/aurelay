@@ -17,23 +17,25 @@ import android.media.MediaFormat
  */
 class OpusEncoder {
 
-    // 目标采样率
-    private const val SAMPLE_RATE = 48000
+    companion object {
+        // 目标采样率
+        private const val SAMPLE_RATE = 48000
 
-    // 声道数
-    private const val CHANNELS = 2
+        // 声道数
+        private const val CHANNELS = 2
 
-    // 目标码率（bps）
-    private const val BIT_RATE = 128000
+        // 目标码率（bps）
+        private const val BIT_RATE = 128000
 
-    // 单帧时长（毫秒）
-    private const val FRAME_MS = 20
+        // 单帧时长（毫秒）
+        private const val FRAME_MS = 20
 
-    // 单帧输入字节数：48000 * 2 * 2 * 0.02
-    const val FRAME_BYTES = SAMPLE_RATE * CHANNELS * 2 * FRAME_MS / 1000
+        // 单帧输入字节数：48000 * 2声道 * 2字节 * 20ms / 1000 = 3840
+        const val FRAME_BYTES = SAMPLE_RATE * CHANNELS * 2 * FRAME_MS / 1000
 
-    // dequeue 超时（微秒）
-    private const val TIMEOUT_US = 20_000L
+        // dequeue 超时（微秒）
+        private const val TIMEOUT_US = 20_000L
+    }
 
     // 编码器实例
     private var codec: MediaCodec? = null
