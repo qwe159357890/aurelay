@@ -785,8 +785,12 @@ fun AurelayApp(
                 }
                 Spacer(modifier = Modifier.height(20.dp))
 
+                // 电脑放音：点列表里的「连接」成功后就**自动**把麦克风声音推给电脑，
+                // 因此文案不应再提「点开始推送」那套旧流程。
                 val statusText = if (isBroadcastMode) {
-                    if (isServiceRunning) "正在广播音频" else "可以开始广播"
+                    if (isServiceRunning) "正在推送麦克风声音"
+                    else if (connectingToIp.isNotEmpty()) "正在连接…"
+                    else "未连接电脑"
                 } else {
                     if (isClientConnected) {
                          if (isMuted) "已静音" else "正在接收播放"
@@ -803,7 +807,9 @@ fun AurelayApp(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = if (isBroadcastMode) {
-                         if (isServiceRunning) "正在监听端口 $port" else "点击「开始」以推送音频"
+                        if (isServiceRunning) "麦克风声音已推送到电脑"
+                        else if (connectingToIp.isNotEmpty()) "正在连接 $connectingToIp …"
+                        else "点下方「我的电脑」里的「连接」即可开始"
                     } else {
                          if (isClientConnected) "已连接：$clientIp:$port" else "点击「开始」以等待连接"
                     },
@@ -1114,9 +1120,9 @@ fun AurelayApp(
                                                                 imageVector = Icons.Rounded.Headphones,
                                                                 contentDescription = null,
                                                                 tint = MaterialTheme.colorScheme.primary,
-                                                                modifier = Modifier.size(24.dp)
+                                                                modifier = Modifier.size(20.dp)
                                                             )
-                                                            Spacer(Modifier.width(8.dp))
+                                                            Spacer(Modifier.width(6.dp))
                                                             Column(
                                                                 modifier = Modifier.weight(1f)
                                                             ) {
@@ -1129,25 +1135,33 @@ fun AurelayApp(
                                                                 )
                                                             }
                                                         }
-                                                        Spacer(Modifier.width(2.dp))
-                                                        IconButton(onClick = { openEditor(index) }) {
+                                                        IconButton(
+                                                            onClick = { openEditor(index) },
+                                                            // IconButton 默认最小触摸目标 48dp，两个就吃掉近 100dp，
+                                                            // 昵称只剩 1 个字。强制压到 30dp 给昵称让出空间。
+                                                            modifier = Modifier.size(30.dp)
+                                                        ) {
                                                             Icon(
                                                                 imageVector = Icons.Rounded.Settings,
                                                                 contentDescription = "编辑",
                                                                 modifier = Modifier.size(18.dp)
                                                             )
                                                         }
-                                                        IconButton(onClick = {
-                                                            DeviceStore.remove(context, index)
-                                                            reloadDevices()
-                                                        }) {
+                                                        IconButton(
+                                                            onClick = {
+                                                                DeviceStore.remove(context, index)
+                                                                reloadDevices()
+                                                            },
+                                                            modifier = Modifier.size(30.dp)
+                                                        ) {
                                                             Icon(
                                                                 imageVector = Icons.Rounded.LinkOff,
                                                                 contentDescription = "删除",
                                                                 modifier = Modifier.size(18.dp)
                                                             )
                                                         }
-                                                        FilledTonalButton(onClick = {
+                                                        FilledTonalButton(
+                                                            onClick = {
                                                             if (isConnectedToThis) {
                                                                 isServiceRunning = false
                                                                 val intent = Intent(context, AudioCaptureService::class.java)
@@ -1167,7 +1181,11 @@ fun AurelayApp(
                                                                     android.Manifest.permission.RECORD_AUDIO
                                                                 )
                                                             }
-                                                        }) {
+                                                        },
+                                                            // 压缩按钮内边距与小宽度，把横向空间让给昵称
+                                                            contentPadding = PaddingValues(horizontal = 10.dp),
+                                                            modifier = Modifier.defaultMinSize(minWidth = 48.dp)
+                                                        ) {
                                                             Text(
                                                                 if (isConnectedToThis) "停止"
                                                                 else if (isConnectingToThis) "连接中"
@@ -1260,7 +1278,7 @@ fun AurelayApp(
 
                         if (isServiceRunning) {
                             Text(
-                                if (isBroadcastMode) "正在广播…" else "正在等待连接…",
+                                if (isBroadcastMode) "正在推送麦克风声音…" else "正在等待连接…",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.secondary
                             )
@@ -1270,6 +1288,9 @@ fun AurelayApp(
             }
 
             // 3. BOTTOM SECTION: Service Control Button
+                // 电脑放音：点列表里的「连接」即自动开始推送，不需要这个「开始」按钮；
+                // 因此仅在正在推送时显示「停止推送」，未连接时整个按钮隐藏。
+                if (!isBroadcastMode || isServiceRunning) {
                 Button(
                 onClick = {
                     if (isServiceRunning) {
@@ -1334,11 +1355,14 @@ fun AurelayApp(
                 )
                 Spacer(Modifier.width(12.dp))
                 Text(
-                    text = if (isServiceRunning) "停止" else "开始",
+                    text = if (isServiceRunning) {
+                        if (isBroadcastMode) "停止推送" else "停止"
+                    } else "开始",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold
                 )
             }
+                }
         }
     }
     
