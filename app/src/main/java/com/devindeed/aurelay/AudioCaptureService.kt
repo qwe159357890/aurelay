@@ -54,6 +54,30 @@ class AudioCaptureService : Service() {
         const val CHANNEL_ID = "AudioCaptureChannel"
         const val TAG = "AudioCaptureService"
         const val DISCOVERY_PORT = 5002
+
+        // 推流状态回传广播：服务必须把自己「到底有没有连上电脑」如实告诉界面。
+        // 界面此前是 startForegroundService 之后就无条件显示「正在广播」，
+        // 导致电脑端根本没开监听时手机也谎报成功——用户无从判断真实状态。
+        const val ACTION_CAPTURE_STATE = "com.devindeed.aurelay.CAPTURE_STATE"
+        const val EXTRA_CAPTURE_STATE = "capture_state"   // connected / failed / stopped
+        const val EXTRA_CAPTURE_REASON = "capture_reason" // failed 时的原因
+        const val EXTRA_CAPTURE_IP = "capture_ip"
+    }
+
+    // 把推流状态如实回传给界面（连上才叫「正在广播」）
+    private fun reportState(state: String, reason: String = "") {
+        val intent = Intent(ACTION_CAPTURE_STATE).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_CAPTURE_STATE, state)
+            putExtra(EXTRA_CAPTURE_REASON, reason)
+            putExtra(EXTRA_CAPTURE_IP, targetIp)
+        }
+        sendBroadcast(intent)
+        DiagLog.i(
+            "连接",
+            if (state == "connected") "已连上电脑 $targetIp，开始推流"
+            else "推流未建立（$state）${if (reason.isNotEmpty()) "：$reason" else ""}"
+        )
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -152,10 +176,12 @@ class AudioCaptureService : Service() {
                 } else {
                     Log.e(TAG, "缺少目标电脑 IP")
                     DiagLog.e("采集", "启动失败：目标电脑 IP 为空（EXTRA_TARGET_IP 未传入）")
+                    reportState("failed", "目标电脑 IP 为空")
                     stopSelf()
                 }
             }
             ACTION_STOP -> {
+                reportState("stopped")
                 stopSelf()
             }
         }
@@ -324,6 +350,8 @@ class AudioCaptureService : Service() {
                 clientSocket = Socket(targetIp, targetPort)
                 clientSocket?.tcpNoDelay = true // Disable Nagle's algorithm for low latency
                 Log.d(TAG, "Connected to receiver successfully")
+                // TCP 连上即证明电脑端确实在监听；如实回报，界面才敢显示「正在广播」
+                reportState("connected")
 
                 val outputStream = clientSocket?.getOutputStream()
 
@@ -440,9 +468,12 @@ class AudioCaptureService : Service() {
 
             } catch (e: IOException) {
                 Log.e(TAG, "Connection/streaming failed: ${e.message}", e)
+                // 电脑端没开监听、被防火墙拦截、手机不在线都会走到这里
+                reportState("failed", "连不上 ${targetIp}:${targetPort}（${e.javaClass.simpleName}）")
                 stopSelf()
             } catch (e: Exception) {
                 Log.e(TAG, "Unexpected error: ${e.message}", e)
+                reportState("failed", e.message ?: e.javaClass.simpleName)
                 stopSelf()
             } finally {
                 encoder?.stop()
