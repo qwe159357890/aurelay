@@ -37,6 +37,8 @@ import javax.net.ssl.SSLServerSocketFactory
 
 class AudioRelayService : Service() {
     private lateinit var mediaSession: MediaSessionCompat
+    // 服务启动时刻：通知用它显示「已运行 X 分 X 秒」
+    private var serviceStartAt: Long = System.currentTimeMillis()
     private lateinit var notificationManager: NotificationManagerCompat
     private var serverThread: Thread? = null
     @Volatile private var lastClientIp: String = ""
@@ -128,6 +130,8 @@ class AudioRelayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // 服务启动时刻：通知用它显示「已运行 X 分 X 秒」
+        serviceStartAt = System.currentTimeMillis()
         // 安装诊断日志器（开关来自设置页，本地文件位于 diag/aurelay-diag.log）
         DiagLog.install(this)
         mediaSession = MediaSessionCompat(this, "AudioRelay")
@@ -351,12 +355,15 @@ class AudioRelayService : Service() {
             NotificationCompat.Builder(this, "audioRelayChannel")
                 .setContentTitle("Aurelay 声音中继")
                 .setContentText(displayText)
-                // 图标统一用 Aurelay 自己的启动图标；其余风格与采集端一致
+                // 图标统一用 Aurelay 自己的启动图标；其余按保活最高策略，与采集端一致：
+                // 最高优先级 + 常驻不可滑走 + 显示持续运行时间 + 点击打开应用
                 .setSmallIcon(com.devindeed.aurelay.R.mipmap.ic_launcher)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .setOngoing(true)
-                .setOnlyAlertOnce(true)
-                .setShowWhen(false)
+                .setShowWhen(true)
+                .setUsesChronometer(true)
+                .setWhen(serviceStartAt)
                 .setContentIntent(openAppPendingIntent)
                 .addAction(
                     android.R.drawable.ic_menu_close_clear_cancel,
@@ -378,12 +385,20 @@ class AudioRelayService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // 与采集端一致：按 8.3「全程保活」用 IMPORTANCE_HIGH
+            //（Android 8+ 通知优先级由渠道决定，LOW 会被系统折叠、服务更易被回收）。
+            // 关闭声音与震动，只提升系统重视程度，不打扰用户。
             val channel =
                 NotificationChannel(
                     "audioRelayChannel",
                     "音频中继服务",
-                    NotificationManager.IMPORTANCE_LOW
-                )
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "手机放音时显示接收状态，用于保持后台运行"
+                    setSound(null, null)
+                    enableVibration(false)
+                    setShowBadge(false)
+                }
             notificationManager.createNotificationChannel(channel)
         }
     }

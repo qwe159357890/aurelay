@@ -36,6 +36,11 @@ class AudioCaptureService : Service() {
     private var audioTrack: AudioTrack? = null // For local playback
     private var clientSocket: Socket? = null
     private var targetIp: String = ""
+    // 服务启动时刻：通知用它显示「已运行 X 分 X 秒」
+    private var serviceStartAt: Long = System.currentTimeMillis()
+    // 通知保活循环开关：不能用 isStreaming 代替——它要等推流协程起来才为 true，
+    // 而保活循环在 startCapture() 开头就要启动，届时 isStreaming 仍为 false
+    private var keepNotifying = false
     private var targetPort: Int = 5000
     private var audioOutputMode: String = "remote_only" // this_device, remote_only, both_devices
     private var isStreaming = false
@@ -66,6 +71,9 @@ class AudioCaptureService : Service() {
 
         // 电脑放音时的实时音量广播（供界面音量环显示）：0~1 的归一化 RMS
         const val ACTION_CAPTURE_LEVEL = "com.devindeed.aurelay.CAPTURE_LEVEL"
+
+        // 前台通知重申间隔（毫秒）：保证通知被清除后能很快重新显示
+        const val NOTIFY_KEEPALIVE_INTERVAL_MS = 30_000L
         const val EXTRA_CAPTURE_LEVEL = "capture_level"
     }
 
@@ -222,8 +230,33 @@ class AudioCaptureService : Service() {
         }
     }
 
+    /**
+     * 定期重申前台通知，保证通知被清除后能重新显示
+     *
+     * 保活策略要求：只要服务还在推流，通知就必须在。重复调用 startForeground()
+     * 是安全的（等价于更新通知），不会重复弹出或产生副作用。
+     *
+     * :return: 无返回值
+     */
+    private fun startNotificationKeepAlive() {
+        keepNotifying = true
+        serviceScope.launch {
+            while (isActive && keepNotifying) {
+                kotlinx.coroutines.delay(NOTIFY_KEEPALIVE_INTERVAL_MS)
+                if (!keepNotifying) break
+                promoteToForeground()
+            }
+        }
+    }
+
     // 启动麦克风采集并推流（电脑放音模式：手机当电脑的无线麦克风）
     private fun startCapture() {
+        serviceStartAt = System.currentTimeMillis()
+        // 通知保活：部分 ROM 或用户「隐藏通知」后会把前台通知撤掉，
+        // 服务一旦失去通知就会降级、进而被系统回收。这里定期重申一次通知，
+        // 保证它始终存在——保活目标要求「被取消就重新显示」。
+        startNotificationKeepAlive()
+
         // ⚠️ 关键点：电脑放音要的是「手机麦克风的声音」，采集源必须是 MIC，
         //    不能用 MediaProjection 的 AudioPlaybackCapture——那录的是系统内部声音。
         //    用内录有两个坏处：
@@ -520,6 +553,7 @@ class AudioCaptureService : Service() {
 
     override fun onDestroy() {
         isStreaming = false
+        keepNotifying = false
         serviceJob.cancel()
         
         // Restore volume if it was muted
@@ -556,11 +590,20 @@ class AudioCaptureService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // ⚠️ Android 8+ 的通知优先级由**渠道重要性**决定，setPriority() 不再生效。
+            // 按 8.3「全程保活」策略必须用 IMPORTANCE_HIGH，否则系统会把本通知
+            // 折叠进「无声通知」分组，服务也更容易被回收。
+            // 同时关闭声音与震动：只提升系统重视程度，不反复打扰用户。
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "音频采集服务",
-                NotificationManager.IMPORTANCE_LOW
-            )
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "电脑放音时显示推送状态，用于保持后台运行"
+                setSound(null, null)
+                enableVibration(false)
+                setShowBadge(false)
+            }
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
         }
@@ -569,29 +612,40 @@ class AudioCaptureService : Service() {
     /**
      * 构建前台服务通知
      *
-     * 样式仿 MicYou 的 AudioService.createNotification()：低优先级、常驻不可滑走、
-     * 只提醒一次、不显示时间戳，**点击通知即停止推送**（MicYou 是点击断开连接）。
-     * 差异仅在图标（用 Aurelay 自己的 ic_launcher）与名称（Aurelay）。
+     * 按设计文档 8.3「全程保活」策略设计，与 MicYou 的低调风格**不同**：
+     * - **最高优先级**：Android 8+ 的实际优先级由通知渠道决定，因此渠道必须用
+     *   `IMPORTANCE_HIGH`（见 `createNotificationChannel`），这里再设 `PRIORITY_MAX`
+     *   兼容旧版本。高优先级能让系统更晚回收本服务，是保活的一环。
+     * - **常驻不可滑走**：`setOngoing(true)`，避免被用户一键清掉导致服务降级。
+     * - **不使用 `setOnlyAlertOnce`**：那会让通知更新时不再提醒，与「保活」目标相悖。
+     *   （渠道已设为不发声不震动，因此不会反复打扰用户。）
+     * - **显示持续运行时间**：`setUsesChronometer(true)` + `setWhen(启动时刻)`，
+     *   通知右侧显示「已运行 X 分 X 秒」，便于确认服务存活时长。
+     * - **点击打开 App**：不做「点击即停止」——停止操作统一在 App 内完成，
+     *   避免误触通知就把推送断掉。
      *
      * :return: 构建好的通知对象
      */
     private fun createNotification(): Notification {
-        // 点击通知 = 停止推送（与 MicYou「点击断开」同逻辑）
-        val stopIntent = Intent(this, AudioCaptureService::class.java).apply {
-            action = ACTION_STOP
+        // 点击通知 = 回到应用（停止推送由用户在 App 内操作，避免误触）
+        val openApp = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or
             (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
-        val contentIntent = PendingIntent.getService(this, 0, stopIntent, flags)
+        val contentIntent = PendingIntent.getActivity(this, 1, openApp, flags)
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Aurelay 正在推送")
-            .setContentText("点击停止推送麦克风声音")
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setContentText("麦克风声音正在推送到电脑，打开应用可停止")
+            .setSmallIcon(com.devindeed.aurelay.R.mipmap.ic_launcher)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setShowWhen(false)
+            // 显示从服务启动时刻起的计时（持续运行时间）
+            .setShowWhen(true)
+            .setUsesChronometer(true)
+            .setWhen(serviceStartAt)
             .setContentIntent(contentIntent)
             .build()
     }
