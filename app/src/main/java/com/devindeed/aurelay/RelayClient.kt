@@ -74,6 +74,7 @@ class RelayClient {
     // 连接参数（来自 AppPrefs）
     private var host: String = ""
     private var port: Int = 15151
+    private var url: String = ""
     private var deviceId: String = ""
     private var token: String = ""
     private var role: Byte = RelayProtocol.ROLE_RECEIVER
