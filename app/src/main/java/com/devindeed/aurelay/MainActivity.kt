@@ -1027,7 +1027,10 @@ fun AurelayApp(
                                                 val isConnectedToThis = clientIp == device.ip && isServiceRunning
                                                 val isConnectingToThis = connectingToIp == device.ip
                                                 Surface(
-                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(64.dp)
+                                                        .padding(vertical = 6.dp),
                                                     shape = RoundedCornerShape(12.dp),
                                                     color = if (isConnectedToThis)
                                                         MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.3f)
@@ -1039,7 +1042,9 @@ fun AurelayApp(
                                                     else null
                                                 ) {
                                                     Row(
-                                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
+                                                        modifier = Modifier
+                                                            .fillMaxSize()
+                                                            .padding(horizontal = 12.dp),
                                                         verticalAlignment = Alignment.CenterVertically,
                                                         horizontalArrangement = Arrangement.SpaceBetween
                                                     ) {
