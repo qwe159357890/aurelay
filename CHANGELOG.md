@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.38] - 2026-10-07
+
+### Fixed
+- **切网络后「音轨已暂停、播放头=0、全程无声」根治**：`handleStream` 的 `finally`
+  块原先**无条件 `audioTrack.pause()`**，切网络会快速重建多路流（旧直连流 + 新中转流
+  并发），旧会话的 finally 把新会话刚 play 起来的音轨又停掉。实测 `16:07:20~16:08:23`
+  切换蜂窝后音轨 `playState=已暂停、播放头=0、欠载=146` 纹丝不动长达 81 秒，数据持续
+  解码写入（帧率 50/s、峰值 0.0dBFS）却不出声。现在引入「会话代次」（`sessionGeneration`），
+  每路流开始领取自己的代次，`finally` 里的暂停/恢复无声锚点/清对端信息/断开广播只在
+  「本会话仍是当前最新一代」时执行，旧会话收尾不再污染新会话状态。
+- **切网络时未关已建立的直连连接**：`stopLanServer()` 原先只关监听 socket，已 accept 的
+  客户端连接仍在读、与新中转流并发写同一音轨。现在一并关闭 `currentClientSocket`。
+- **上报模式与链路切换判定不一致**：`AddressReporter.reportOnce()` 原先用
+  `NetworkWatcher.detect()` 实时探测网络，会受系统回调延迟/抖动影响，与
+  `AudioRelayService` 链路切换（同一回调里 `refresh()` 缓存的类型）矛盾——实测
+  服务已切中转，上报却仍写「直连模式」。改用 `NetworkWatcher.lastKnown()` 缓存值
+  （缓存未初始化时才退化实时探测），保证「上报的 mode == 实际选的链路」。
+
 ## [v1.5.37] - 2026-10-07
 
 ### Fixed
