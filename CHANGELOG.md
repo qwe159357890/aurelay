@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.42] - 2026-10-07
+
+### Fixed
+- **蜂窝→WiFi 切换后 PC 空推流约 20 秒才重连的根治（本次 19:42 事故）**：
+  手机切回 WiFi 停中转时，`RelayClient.stop()` 用 `webSocket.cancel()` 硬断 TCP
+  （不发 WebSocket close 帧），服务端 R 连接不能立即感知下线，且与「R 被新连接取代」
+  竞态叠加，`finally` 里的「清 S」延迟约 20 秒才执行，期间 PC 一直往已无接收方的
+  房间空推流。修复：`closeWebSocket()` 改为优雅 `close(1000)` 发 close 帧，服务端
+  立即进 finally 清 S（配合服务端「转发兜底」，把切换空窗压到毫秒级）。
+
 ## [v1.5.41] - 2026-10-07
 
 ### Fixed
