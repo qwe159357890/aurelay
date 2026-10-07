@@ -427,15 +427,29 @@ class RelayClient {
     /**
      * 关闭当前 WebSocket
      *
+     * 用优雅关闭（发 WebSocket close 帧）而非 cancel() 硬断：硬断只断开本地 TCP，
+     * 服务端可能收不到立即的关闭通知，要等 TCP 空闲超时（最长 90 秒）才感知，
+     * 进而导致「R 下线清 S」迟迟不触发、PC 空推流几十秒（实测 19:42 蜂窝→WiFi
+     * 切换延迟 20 秒）。优雅 close 会让服务端马上收到 close 帧、立即进 finally
+     * 清 S，把切换空窗压到毫秒级。
+     *
      * :return: 无返回值
      */
     private fun closeWebSocket() {
-        try {
-            webSocket?.cancel()
-        } catch (e: Exception) {
-            // 忽略关闭异常
-        }
+        val ws = webSocket
         webSocket = null
+        if (ws == null) return
+        try {
+            // 优雅关闭：发送 close 帧（1000 正常关闭），服务端立即感知
+            ws.close(1000, "client closing")
+        } catch (e: Exception) {
+            // close 失败（连接已死）再硬断兜底
+            try {
+                ws.cancel()
+            } catch (e2: Exception) {
+                // 忽略关闭异常
+            }
+        }
     }
 
     /**
