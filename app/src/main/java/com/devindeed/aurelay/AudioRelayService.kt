@@ -69,6 +69,16 @@ class AudioRelayService : Service() {
     // 48kHz 的 Opus 按 44.1kHz 裸 PCM 播放，听感即严重失真。
     @Volatile private var headerIncomplete: Boolean = false
 
+    // 中转链路「扫描魔数失败」的连续次数与最近一次触发重连的时间戳。
+    // 中转下 PC 端每次连接只发一次 AURL 包头，手机若因残留帧/时序错过包头，
+    // 后续纯 Opus 帧里再也不会出现魔数，scanRelayMagic 会扫满 64KB 后放弃；
+    // 而 startRelayLink 的消费循环拿到的仍是同一根管道（WebSocket 未断），
+    // 于是陷入「重扫→失败→再重扫」死循环（实测 20:12:42 起每 5.6 秒一轮）。
+    // 这里在扫描失败时触发一次受控的中转重连，让 PC 重新发包头；用 5 秒
+    // 最短间隔限频，避免与「残留帧」短暂错过叠加成高频重连。
+    @Volatile private var relayHeaderMissCount: Int = 0
+    @Volatile private var relayLastForceReconnectAt: Long = 0L
+
     // 当前一路客户端会话的 socket（用于「停止会话」时主动关闭，见 stopAudioSession）
     @Volatile private var currentClientSocket: Socket? = null
 
@@ -881,6 +891,13 @@ class AudioRelayService : Service() {
             // 听感是失真越来越重，且电脑静音时噪声底被放大成起伏的嗡嗡声。
             if (header == null && headerIncomplete) {
                 DiagLog.w("协议", "流包头未收全，放弃本次会话（不按裸 PCM 处理）")
+                // 中转链路：包头被错过后纯 Opus 帧里再也找不到魔数，若不重建连接，
+                // 上层消费循环会拿同一根管道反复重扫、永远失败（死循环）。
+                // 这里触发一次受控重连，让 PC 端重新发包头。局域网直连则由对端
+                // 断开/重连自然恢复，无需额外处理。
+                if (isRelayPeer) {
+                    onRelayHeaderMissed()
+                }
                 return
             }
 
@@ -890,6 +907,10 @@ class AudioRelayService : Service() {
             var streamSampleRate = 44100
 
             if (header != null) {
+                // 成功定位到包头，清零「包头缺失」计数，避免残留计数导致下次误重连
+                if (isRelayPeer) {
+                    relayHeaderMissCount = 0
+                }
                 framed = true
                 codec = header[5].toInt() and 0xFF
                 streamChannels = if ((header[6].toInt() and 0xFF) == 1) 1 else 2
@@ -1001,6 +1022,32 @@ class AudioRelayService : Service() {
                     Log.e("AudioRelay", "Failed to broadcast client disconnected: ${ex.message}", ex)
                 }
             }
+        }
+    }
+
+    // 中转链路扫描魔数失败时，受控触发一次中转重连（让 PC 重新发包头）
+    private fun onRelayHeaderMissed() {
+        // 只在「真正的中转链路」下处理；链路自检可能已切走，重连前再确认一次
+        if (!relayClient.isRunning()) return
+        val now = System.currentTimeMillis()
+        // 时间间隔限频：扫满 64KB 仍未找到魔数已是「包头确实丢失」的强信号，
+        // 应尽快重连让 PC 重发包头；但若重连后立刻又失败，说明是更底层的震荡，
+        // 用 5 秒最短间隔兜底，避免与「残留帧」短暂错过叠加成高频重连
+        // （历史教训 18:45 三方共振死循环）。
+        relayHeaderMissCount++
+        val minIntervalMs = 5000L
+        val needReconnect = relayHeaderMissCount >= 1 && (now - relayLastForceReconnectAt) >= minIntervalMs
+        if (!needReconnect) {
+            DiagLog.w("协议", "中转包头缺失计数 ${relayHeaderMissCount}，距上次重连过近，暂不重连")
+            return
+        }
+        relayHeaderMissCount = 0
+        relayLastForceReconnectAt = now
+        DiagLog.w("协议", "中转链路扫描不到 AURL 包头，触发受控重连让 PC 重新发包头")
+        try {
+            relayClient.forceReconnect()
+        } catch (e: Exception) {
+            DiagLog.e("协议", "触发中转重连失败：${e.message}", e)
         }
     }
 
