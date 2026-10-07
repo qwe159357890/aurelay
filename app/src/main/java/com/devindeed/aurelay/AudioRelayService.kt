@@ -63,6 +63,12 @@ class AudioRelayService : Service() {
     // 当前一路客户端会话的 socket（用于「停止会话」时主动关闭，见 stopAudioSession）
     @Volatile private var currentClientSocket: Socket? = null
 
+    // 音频会话代次：每开始一路新的流处理（handleStream）就 +1，会话自己记下当时的代次。
+    // 用于「音轨暂停」的归属判定——旧会话的 finally 若在更新会话已建立后仍去 pause 音轨，
+    // 会把新会话刚 play 起来的音轨又停掉，表现为「数据在写、播放头却纹丝不动、全程无声」
+    // （实测 16:07:20~16:08:23 切换蜂窝后音轨 playState=已暂停、播放头=0 长达 81 秒）。
+    @Volatile private var sessionGeneration: Long = 0
+
     // 当前 AudioTrack 采用的采样率与声道数（流协商结果，用于判断是否需要重建）
     private var currentSampleRate: Int = 0
     private var currentOutChannels: Int = 0
@@ -205,6 +211,16 @@ class AudioRelayService : Service() {
             DiagLog.w("服务", "关闭监听端口失败：${e.message}")
         }
         serverSocket = null
+        // 切网络时，除了关监听 socket，还要关掉「已 accept 的当前客户端连接」。
+        // 只关监听 socket 的话，已建立的直连流还会继续读（isServerRunning 已被
+        // startRelayLink 置回 true，旧直连流的 while 循环不会退），与新中转流并发
+        // 写同一个音轨——这就是切网络后音轨状态错乱的并发根源。
+        try {
+            currentClientSocket?.close()
+        } catch (e: Exception) {
+            DiagLog.w("服务", "关闭当前客户端连接失败：${e.message}")
+        }
+        currentClientSocket = null
         serverThread?.interrupt()
         serverThread = null
     }
@@ -764,7 +780,10 @@ class AudioRelayService : Service() {
     private fun handleStream(rawInput: InputStream, peerLabel: String) {
         var decoder: OpusDecoder? = null
         var session: DiagSession? = null
-        DiagLog.i("连接", "开始处理来自 $peerLabel 的音频流")
+        // 领取本次会话代次：finally 里只允许「仍是当前最新会话」的这一路去暂停音轨，
+        // 否则切网络快速重建的多路流会互相把对方的音轨 pause 掉。
+        val myGeneration = ++sessionGeneration
+        DiagLog.i("连接", "开始处理来自 $peerLabel 的音频流（会话代次 #$myGeneration）")
         // 链路已建立：把连接状态同步给界面与通知。
         // 中转链路此前**完全没走这一步**，于是音频明明在播、界面却一直显示
         // 「等待连接」（实测 09:37-09:38）。直连由 handleClient 负责设置，
@@ -871,30 +890,42 @@ class AudioRelayService : Service() {
             // 只暂停并清空缓冲、不释放音轨：下一路客户端连接时 ensureAudioTrack()
             // 会重新 play()。若这里写 stop()，音轨会停在 STOPPED 状态，
             // 后续会话复用同一个音轨时就会「连着但没声音」。
-            try {
-                audioTrack?.pause()
-                audioTrack?.flush()
-            } catch (e: Exception) {
-                // 忽略暂停异常
+            // 【并发守卫】仅当本会话仍是「最新一代」时才允许暂停：切网络会快速重建
+            // 多路流，若旧会话的 finally 无条件 pause，会把新会话刚 play 的音轨停掉，
+            // 结果就是「数据持续解码写入、音轨却一直已暂停、播放头=0 无声」。
+            if (myGeneration == sessionGeneration) {
+                try {
+                    audioTrack?.pause()
+                    audioTrack?.flush()
+                } catch (e: Exception) {
+                    // 忽略暂停异常
+                }
             }
             Log.i("AudioRelay", "Client disconnected.")
             DiagLog.i("连接", "音频流结束（$peerLabel）")
-            // 音频流结束，无声播放锚点恢复工作
-            SilentPlayer.setScenarioAllowed(this, true)
-            // Clear client info and update notification
-            lastClientName = ""
-            notifyConnected()
-            // Broadcast disconnect event so UI can update
-            try {
-                val bcast = Intent("com.devindeed.aurelay.CLIENT_CONNECTION")
-                bcast.setPackage(packageName)
-                bcast.putExtra("connected", false)
-                bcast.putExtra("client_ip", "")
-                sendBroadcast(bcast)
-                Log.i("AudioRelay", "Broadcast sent: CLIENT_CONNECTION connected=false")
-                lastClientIp = ""
-            } catch (ex: Exception) {
-                Log.e("AudioRelay", "Failed to broadcast client disconnected: ${ex.message}", ex)
+            // 【并发守卫】旧会话的收尾动作（恢复无声锚点 / 清对端信息 / 广播断开）
+            // 同样只在「本会话仍是当前最新一代」时执行。否则切网络快速重建时，
+            // 旧会话的 finally 会把新会话刚建立的状态（连接通知、对端名）清掉，
+            // 造成界面「已连接/已断开」反复跳、通知状态错乱。
+            val isLatest = myGeneration == sessionGeneration
+            // 音频流结束，无声播放锚点恢复工作（仅最新会话才允许恢复，避免抢断新会话的占用）
+            if (isLatest) {
+                SilentPlayer.setScenarioAllowed(this, true)
+                // Clear client info and update notification
+                lastClientName = ""
+                notifyConnected()
+                // Broadcast disconnect event so UI can update
+                try {
+                    val bcast = Intent("com.devindeed.aurelay.CLIENT_CONNECTION")
+                    bcast.setPackage(packageName)
+                    bcast.putExtra("connected", false)
+                    bcast.putExtra("client_ip", "")
+                    sendBroadcast(bcast)
+                    Log.i("AudioRelay", "Broadcast sent: CLIENT_CONNECTION connected=false")
+                    lastClientIp = ""
+                } catch (ex: Exception) {
+                    Log.e("AudioRelay", "Failed to broadcast client disconnected: ${ex.message}", ex)
+                }
             }
         }
     }
