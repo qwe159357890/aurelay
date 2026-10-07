@@ -294,6 +294,11 @@
             android:foregroundServiceType="mediaPlayback" />
 
         <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <service
             android:name=".AudioCaptureService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
