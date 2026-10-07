@@ -15,8 +15,6 @@ and this project adheres to Semantic Versioning (https://semver.org/).
   - **PC 端**：`ws.send_binary()` 的返回值是**实际写入字节数**，连接拥塞或帧过大时
     会小于 `len(data)`，甚至返回 0。旧代码忽略返回值、无条件当成功，
     于是 8 字节包头被部分发送/丢弃。现在校验 `sent == len(data)`，否则判失败并重连。
-  - **App 端**：`PipedOutputStream.write()` 是**可能部分写入**的（256KB 缓冲区满时
-    只写进一部分就返回）。现在循环写满为止，避免音频帧被截断。
 - **关掉「自动启动」后仍自动启动服务**：`KeepAliveReceiver`（AlarmManager 兜底）与
   `KeepAliveJobService`（JobScheduler 兜底）都只检查「全程保活」开关，
   **完全绕过了「自动启动」开关**，于是每15 分钟照旧把服务拉起来。

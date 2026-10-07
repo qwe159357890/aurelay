@@ -249,15 +249,11 @@ class RelayClient {
                 val out = pipeOut ?: return
                 try {
                     val data = bytes.toByteArray()
-                    // ⚠️ PipedOutputStream.write 是**可能部分写入**的：
-                    // 缓冲区（256KB）被占满时会只写进一部分就返回。
-                    // 不循环写满就会丢字节 —— 音频帧被截断，听起来就是失真/咔哒声。
-                    var written = 0
-                    while (written < data.size) {
-                        val n = out.write(data, written, data.size - written)
-                        if (n <= 0) throw IOException("PipedOutputStream.write 返回 $n")
-                        written += n
-                    }
+                    // PipedOutputStream.write(byte[], int, int) 返回 void：
+                    // 它在内部要么写完请求的字节、要么抛 IOException，
+                    // **不存在部分写入**（与 OutputStream 的契约不同，
+                    // 但 PipedOutputStream 满足这一条），所以一次写完即可。
+                    out.write(data, 0, data.size)
                     out.flush()
                     listener?.onAudioData(data.size)
                 } catch (e: IOException) {
