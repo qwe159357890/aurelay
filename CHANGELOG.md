@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.31] - 2026-10-07
+
+### Fixed
+- **PC 端「停止后无法重新推送」（蜂窝）**：中转握手在手机端尚未就绪时
+  （`ready=False`）也返回成功，于是 PC 带着一条「服务器还不认识对端」的连接开始推流，
+  音频被丢弃；重连时又复用这条死连接，表现为「点开始后一直推送失败、30 秒后重试」，
+  服务端则不断返回 `409 已被新的连接取代`（PC 自己顶掉自己）。
+  现在握手未收到 `ready` 即判定失败并主动关闭连接，走正常的退避重试。
+- **手机端「停止 → 开始」后中转起不来**：`RelayClient` 复用单例，上一轮的
+  WebSocket 引用与管道残骸还在，新一轮 `start()` 会与旧连接抢同一个 OkHttp 管道。
+  现在重启前先彻底 `stop()` 一次。
+- **「写入音频管道失败 | Read end dead」刷屏**（实测一次刷出 838 行日志）：
+  `stop()` 关掉管道后，OkHttp 线程里已排队的 WebSocket 数据帧仍会回调 `onMessage`，
+  继续往已关闭的管道写。现在先判 `running` 与管道空引用，并对 `IOException`
+  按正常收尾处理，不再逐帧刷错误。
+- **常驻通知可以被划走**：`startForeground` 只在 `onCreate` 调一次，之后一律用
+  `notify()` 刷新——那是**普通通知**，服务一旦被系统降级到后台就不再受保护。
+  现在每次刷新都重新走 `startForeground`，把通知拉回「前台服务通知」不可划走。
+
+### Changed
+- **常驻通知文案**改为「标题=状态 / 正文=极短动作提示」两行式（借鉴 MicYou），
+  去掉原来会被系统提示挤成一团的「后台常驻运行 · 等待接收音频」长句；
+  会话通知同步改为「$peer · 点此管理」，并加 `setOnlyAlertOnce` / 隐藏时间戳。
+- **点「开始」立即上报一次地址与链路状态**，PC 端不用再等一个上报周期（最长 60 秒）。
+- **中转会话回显已连接状态**：中转此前不走 `handleClient`，音频明明在播、界面却一直
+  显示「等待连接」。现在抽出 `markSessionEstablished`，两条链路统一设置对端信息、
+  广播连接状态并张贴会话通知。
+
+### Added
+- **运行时长显示**：界面状态区新增「已连续运行 X 小时 Y 分 Z 秒」，
+  自本次打开 App 起累计、每秒刷新。保活失效时该数字会停住或归零，
+  是判断「到底有没有被系统留着」最直接的证据。
+
 ## [v1.5.30] - 2026-10-07
 
 ### Fixed

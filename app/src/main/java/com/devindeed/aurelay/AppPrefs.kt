@@ -50,6 +50,11 @@ object AppPrefs {
     // 上次链路方式（服务重启后恢复现场用：lan / relay / 空）
     const val KEY_LAST_LINK_MODE = "last_link_mode"
 
+    // 本次打开App 的时刻（毫秒时间戳）。
+    // 用途：界面显示「已连续运行 X 小时 Y 分 Z 秒」，用来确认保活是否真的持续。
+    // 每次打开 App 重新写入，因此「上次 1 点打开、2 点半查看」会显示 1 小时 30 分。
+    const val KEY_APP_OPEN_AT = "app_open_at"
+
     // 默认中转服务器地址（复用中心服务器的 15151 端口，不再另开端口）
     const val DEFAULT_RELAY_SERVER = "039039.xyz:15151"
 

@@ -145,6 +145,10 @@ class AudioRelayService : Service() {
         super.onCreate()
         // 服务启动时刻：通知用它显示「已运行 X 分 X 秒」
         serviceStartAt = System.currentTimeMillis()
+        // 记下本次打开 App 的时刻，界面据此显示「已连续运行」时长。
+        // 只在服务首次创建时写入：服务存活期间的多次通知刷新不应重置计时。
+        // AppPrefs 没有 Long 版接口，这里存十进制字符串。
+        AppPrefs.setString(this, AppPrefs.KEY_APP_OPEN_AT, serviceStartAt.toString())
         // 安装诊断日志器（开关来自设置页，本地文件位于 diag/aurelay-diag.log）
         DiagLog.install(this)
         mediaSession = MediaSessionCompat(this, "AudioRelay")
@@ -333,15 +337,16 @@ class AudioRelayService : Service() {
         val peer = if (lastClientName.isNotEmpty()) lastClientName
         else lastClientIp.ifEmpty { "电脑" }
 
+        // 文案同样按「标题=状态 / 正文=来源与动作」两行式，避免长句挤成一片
         return NotificationCompat.Builder(this, "audioRelayChannel")
             .setContentTitle("正在接收电脑声音")
-            .setContentText("来自 $peer")
+            .setContentText("$peer · 点此管理")
             .setSmallIcon(com.devindeed.aurelay.R.mipmap.ic_launcher)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setOngoing(true)
-            .setShowWhen(true)
-            .setWhen(System.currentTimeMillis())
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
             .setContentIntent(openAppPendingIntent)
             .addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
@@ -416,6 +421,8 @@ class AudioRelayService : Service() {
             }
         }
         serverThread = Thread({ startAudioServer() }, "AurelayLanServer").also { it.start() }
+        // 同理：点「开始」后立刻上报，PC 端不用等一个上报周期
+        reportNow("start-lan")
         DiagLog.i("服务", "已选择局域网直连：监听 $AUDIO_PORT 端口")
     }
 
@@ -439,6 +446,14 @@ class AudioRelayService : Service() {
                 try { old.join(500) } catch (_: InterruptedException) { }
             }
         }
+        // 中转客户端若带着上一轮的残骸（running 已false 但 WebSocket 引用还在），
+        // 必须先彻底停一次再启动，否则新 connectOnce 会与旧连接抢同一个 OkHttp 管道，
+        // 表现为「点开始后手机在线、PC 端却一直连不上」。
+        try {
+            relayClient.stop()
+        } catch (e: Exception) {
+            DiagLog.w("中转", "重启前清理旧中转连接失败：${e.message}")
+        }
         relayThread = Thread({
             try {
                 relayClient.start(this@AudioRelayService, RelayProtocol.ROLE_RECEIVER, AUDIO_PORT)
@@ -450,7 +465,31 @@ class AudioRelayService : Service() {
                 DiagLog.e("中转", "中转接收异常", e)
             }
         }, "AurelayRelayStream").also { it.start() }
+        // 用户点「开始」后要**立刻**把当前链路状态同步到中心服务器，
+        // 否则 PC 端要等到下个周期（最长 60 秒）才知道这台手机已就绪。
+        reportNow("start-relay")
         DiagLog.i("服务", "已选择服务器中转：主动出站连接中转服务器")
+    }
+
+    /**
+     * 立即上报一次地址与链路状态
+     *
+     * :param reason: 触发原因（仅进日志，便于排查是哪条路径触发的）
+     * :return: 无返回值
+     */
+    private fun reportNow(reason: String) {
+        try {
+            Thread({
+                try {
+                    AddressReporter.reportOnce(applicationContext)
+                    DiagLog.i("上报", "已立即上报（触发点：$reason）")
+                } catch (e: Exception) {
+                    DiagLog.w("上报", "立即上报失败（$reason）：${e.message}")
+                }
+            }, "AurelayReportNow").also { it.isDaemon = true; it.start() }
+        } catch (e: Exception) {
+            DiagLog.w("上报", "启动立即上报线程失败：${e.message}")
+        }
     }
 
     /**
@@ -522,16 +561,18 @@ class AudioRelayService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // 常驻通知：不论当前有没有会话都要写明「后台还在跑」，
-        // 否则用户会以为点过停止之后 App 已经彻底关了。
+        // 常驻通知文案：借鉴 MicYou 的「标题=状态 / 正文=极短动作提示」两行式。
+        // 原先正文写成「后台常驻运行 · 等待接收音频」这种长句，在通知栏里被
+        // 系统的「正在其他应用的上层运行 / 显示内容…」提示挤成一坨，很难读。
         val displayText = if (lastClientName.isNotEmpty()) {
-            "正在接收来自 $lastClientName 的音频"
+            "正在接收电脑声音 · 点此管理"
         } else {
-            "后台常驻运行 · 等待接收音频"
+            "声音中继已开启 · 点此管理"
         }
 
         val builder =
             NotificationCompat.Builder(this, "audioRelayChannel")
+                // 标题只说状态，不塞动作
                 .setContentTitle("Aurelay 声音中继")
                 .setContentText(displayText)
                 // 图标统一用 Aurelay 自己的启动图标；其余按保活最高策略，与采集端一致：
@@ -673,25 +714,6 @@ class AudioRelayService : Service() {
         val peer = try { client.inetAddress.hostAddress ?: "" } catch (ex: Exception) { "" }
         Log.i("AudioRelay", "Client connected: $peer")
         DiagLog.i("连接", "电脑端已连接：$peer:${client.port}（本机端口 $AUDIO_PORT）")
-
-        // Update notification with sender name (check runtime permission on Android 13+)
-        notifyConnected()
-
-        // Broadcast connection event so UI can update
-        try {
-            val bcast = Intent("com.devindeed.aurelay.CLIENT_CONNECTION")
-            bcast.setPackage(packageName)
-            bcast.putExtra("connected", true)
-            bcast.putExtra("client_ip", peer)
-            sendBroadcast(bcast)
-            Log.i("AudioRelay", "Broadcast sent: CLIENT_CONNECTION connected=true ip=$peer")
-        } catch (ex: Exception) {
-            Log.e("AudioRelay", "Failed to broadcast client connected: ${ex.message}", ex)
-        }
-
-        lastClientIp = peer
-        // 真有电脑连进来才张贴会话通知（与常驻通知并列，共两条）
-        updateSessionNotification(true)
         try {
             handleStream(client.getInputStream(), peer)
         } finally {
@@ -705,11 +727,48 @@ class AudioRelayService : Service() {
         }
     }
 
+    /**
+     * 标记「音频会话已建立」：刷新对端信息、广播连接状态、张贴会话通知
+     *
+     * 局域网直连与服务器中转共用。中转链路此前没有这一步，
+     * 导致音频已在播放而界面始终显示「等待连接」。
+     *
+     * :param peerLabel: 对端标识（直连为对端 IP，中转为「中转服务器」）
+     * :return: 无返回值
+     */
+    private fun markSessionEstablished(peerLabel: String) {
+        val isRelay = peerLabel == "中转服务器"
+        val shownName = if (isRelay) "电脑（经服务器中转）" else peerLabel
+        lastClientIp = peerLabel
+        lastClientName = shownName
+        // Update notification with sender name (check runtime permission on Android 13+)
+        notifyConnected()
+        // Broadcast connection event so UI can update
+        try {
+            val bcast = Intent("com.devindeed.aurelay.CLIENT_CONNECTION")
+            bcast.setPackage(packageName)
+            bcast.putExtra("connected", true)
+            bcast.putExtra("client_ip", peerLabel)
+            bcast.putExtra("client_name", shownName)
+            sendBroadcast(bcast)
+            Log.i("AudioRelay", "Broadcast sent: CLIENT_CONNECTION connected=true ip=$peerLabel")
+        } catch (ex: Exception) {
+            Log.e("AudioRelay", "Failed to broadcast client connected: ${ex.message}", ex)
+        }
+        // 真有电脑连进来才张贴会话通知（与常驻通知并列，共两条）
+        updateSessionNotification(true)
+    }
+
     // 统一的流处理：先读流包头判定编码，再进入对应解码链路（局域网直连与服务器中转共用）
     private fun handleStream(rawInput: InputStream, peerLabel: String) {
         var decoder: OpusDecoder? = null
         var session: DiagSession? = null
         DiagLog.i("连接", "开始处理来自 $peerLabel 的音频流")
+        // 链路已建立：把连接状态同步给界面与通知。
+        // 中转链路此前**完全没走这一步**，于是音频明明在播、界面却一直显示
+        // 「等待连接」（实测 09:37-09:38）。直连由 handleClient 负责设置，
+        // 中转没有对应的 handleClient，就在此统一补上。
+        markSessionEstablished(peerLabel)
         // 真实音频开始播放，无声播放锚点让位（避免底噪混入输出）
         SilentPlayer.setScenarioAllowed(this, false)
         try {
@@ -828,8 +887,18 @@ class AudioRelayService : Service() {
     private fun notifyConnected() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
-            @SuppressLint("MissingPermission")
-            notificationManager.notify(NOTIFICATION_ID, buildNotification())
+            // 必须重新走 startForeground，不能只用 notify()。
+            // notify() 刷出来的是一条**普通通知**：一旦服务被系统降级到后台
+            // （点过一次停止、或被其他 App 抢占资源），它就不再受前台服务保护，
+            // 用户可以随手划掉——实测就是这样丢掉常驻通知的。
+            // startForeground 会把同ID 的通知重新拉回「前台服务通知」，不可划走。
+            try {
+                startForeground(NOTIFICATION_ID, buildNotification())
+            } catch (e: Exception) {
+                Log.w("AudioRelay", "startForeground 刷新失败，退回 notify：${e.message}")
+                @SuppressLint("MissingPermission")
+                notificationManager.notify(NOTIFICATION_ID, buildNotification())
+            }
         } else {
             Log.w("AudioRelay", "Missing POST_NOTIFICATIONS permission; skipping notification update")
         }
@@ -863,7 +932,15 @@ class AudioRelayService : Service() {
         if (magic == STREAM_MAGIC && (header[4].toInt() and 0xFF) == STREAM_VERSION) {
             return header
         }
-        // 非自研协议：退回字节，走官方裸 PCM 分支
+        // 非自研协议：退回字节，走官方裸 PCM 分支。
+        // 这里必须把「读到的到底是什么」记进日志：一旦误判，手机会按 44.1kHz 裸 PCM
+        // 去播48kHz 的 Opus 数据，码率会从~976kbps掉到 100kbps 上下，听感就是严重失真。
+        // 实测 09:37 手机侧多次出现「未检测到 AURL 包头」，而 PC 端当时正在并发竞速
+        // 探测（IPv6 直连 + 中转同时试），先到的那条流是探测流。
+        DiagLog.w(
+            "协议",
+            "未检测到 AURL 包头（读到 ${header.joinToString(" ") { "%02x".format(it) }}），按官方裸 PCM 处理"
+        )
         input.unread(header, 0, HEADER_SIZE)
         return null
     }

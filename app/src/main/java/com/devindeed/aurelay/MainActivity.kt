@@ -595,6 +595,20 @@ fun AurelayApp(
     var diagBusy by remember { mutableStateOf(false) }
     var connectingToIp by remember { mutableStateOf("") } // Track which device we're connecting to
 
+    // 运行时长：自「本次打开 App」起累计，用于确认保活是否真的持续。
+    // 每秒刷新一次；App 每次打开由AudioRelayService.onCreate 重置基准时刻。
+    val appOpenAt = remember {
+        PreferenceManager.getDefaultSharedPreferences(context)
+            .getString(AppPrefs.KEY_APP_OPEN_AT, "")?.toLongOrNull() ?: 0L
+    }
+    var nowTick by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowTick = System.currentTimeMillis()
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+
     // 观察采集服务回传的真实推流状态：连上才显示「正在广播」，连不上提示原因。
     // 在此之前是 startForegroundService 之后无条件置 isServiceRunning = true，
     // 导致电脑端根本没开监听时手机也谎报成功——用户完全无法判断真实状态。
@@ -839,6 +853,16 @@ fun AurelayApp(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                // 运行时长：一眼看出 App 从打开到现在是否一直被系统留着。
+                // 保活失效时这个数字会停住或随进程重启归零，正好是最直接的证据。
+                if (appOpenAt > 0L) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "已连续运行 ${formatUptime(nowTick - appOpenAt)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             // 2. MIDDLE SECTION: Visualizer OR Connection Info
@@ -2320,6 +2344,27 @@ fun FakeAudioVisualizer() {
                     .background(brush)
             )
         }
+    }
+}
+
+/**
+ * 把运行时长毫秒数格式化成「X 小时 Y 分 Z 秒」
+ *
+ * 秒级一直显示，方便用户精确判断保活是否持续（例如 1 点打开、2 点半查看，
+ * 应显示「1 小时 30 分 0 秒」）。不足 1 小时只显示分与秒。
+ *
+ * @param millis: 运行时长（毫秒）
+ * @return: 形如「1 小时 30 分 0 秒」或「12 分 5 秒」的中文文案
+ */
+fun formatUptime(millis: Long): String {
+    val totalSeconds = (millis / 1000).coerceAtLeast(0)
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+    return if (hours > 0) {
+        "%d 小时 %d 分 %d 秒".format(hours, minutes, seconds)
+    } else {
+        "%d 分 %d 秒".format(minutes, seconds)
     }
 }
 

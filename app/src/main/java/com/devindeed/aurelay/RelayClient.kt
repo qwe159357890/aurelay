@@ -112,8 +112,7 @@ class RelayClient {
         if (running) return
         val app = context.applicationContext
         val server = AppPrefs.getString(app, AppPrefs.KEY_RELAY_SERVER, AppPrefs.DEFAULT_RELAY_SERVER)
-        val cleaned = server.removePrefix("ws://").removePrefix("wss://")
-        val separator = cleaned.lastIndexOf(':')
+        val cleaned = server.removePrefix("ws://").removePrefix("wss://")        val separator = cleaned.lastIndexOf(':')
         host = if (separator > 0) cleaned.substring(0, separator) else cleaned
         port = if (separator > 0) cleaned.substring(separator + 1).toIntOrNull() ?: 15151 else 15151
         // ⚠️ url 字段此前**从未被赋值**，而 connectOnce() 直接拿它建 WebSocket，
@@ -242,11 +241,20 @@ class RelayClient {
 
             override fun onMessage(socket: WebSocket, bytes: okio.ByteString) {
                 lastAliveAt = System.currentTimeMillis()
+                // 必须先判 running：stop() 会把管道置空并关闭，但已排队的数据帧
+                // 仍会回调到这里。此前无脑往 pipeOut 写，会刷出成百上千行
+                // 「写入音频管道失败 | Read end dead」（实测 09:16-09:17 共 838 行）。
+                if (!running) return
+                val out = pipeOut ?: return
                 try {
                     val data = bytes.toByteArray()
-                    pipeOut?.write(data)
-                    pipeOut?.flush()
+                    out.write(data)
+                    out.flush()
                     listener?.onAudioData(data.size)
+                } catch (e: IOException) {
+                    // 管道已断（对端停止接收）：属于正常收尾，不必逐帧刷错误日志
+                    DiagLog.w("中转", "音频管道已断开，忽略残余数据帧")
+                    running = false
                 } catch (e: Exception) {
                     DiagLog.e("中转", "写入音频管道失败", e)
                 }
