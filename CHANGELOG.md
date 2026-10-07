@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.37] - 2026-10-07
+
+### Fixed
+- **蜂窝↔WiFi 切换后高频闪屏、无法播放根治**：手机日志 `15:11:50~58` 共 510 次
+  「中转链路读到无包头的音频数据，判定为旧会话残留」，约 60 次/秒死循环。根因是
+  `readHeader` 读到残留帧只「放弃本次会话」却没断连接，而上层 `relayThread` 的
+  `while(isRunning)` 会立刻再次消费**同一条还没读到底的管道**，又读到下一段残留帧
+  → 再放弃 → 无限循环，每次还触发 `markSessionEstablished` 广播，界面状态文字
+  「连接成功/失败」高频闪屏。现在检测到残留帧时调用新增的
+  `RelayClient.forceReconnect()`：主动断开当前 WebSocket、丢弃旧管道，重连成功后
+  重建干净管道，新数据才是正经 AURL 包头，死循环随之消除。
+
 ## [v1.5.36] - 2026-10-07
 
 ### Fixed
