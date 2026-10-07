@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.40] - 2026-10-07
+
+### Fixed
+- **中转「残留帧 → forceReconnect → 重连 → 又残留」死循环根治（扫描魔数）**：服务端
+  「R 重接入/下线清 S」异步 close 旧 S 时，旧 S 已排队的 Opus 帧仍会被转发给手机，
+  手机 `readHeader` 读满 8 字节读到的却是旧会话残留（如 `01 01 02 01 00 00 00 f7`，
+  缺前 4 字节魔数 `AURL`）。旧代码据此「判定旧会话残留 → forceReconnect」→ R 重连 →
+  服务端又清 S → PC 又重连 → 又发包头 → 又被残留帧抢先 → 又误判，三方共振死循环
+  （实测 18:45 每秒重连 1~2 次、永远凑不齐稳定窗口、完全无声音）。现在改为**扫描魔数**：
+  中转链路读到非 `AURL` 开头时，逐字节跳过残留、滑动窗口定位到 `41 55 52 4c` 魔数
+  （最多扫 64KB + 超时兜底），接上真正的包头，不再 forceReconnect，死循环彻底打破。
+- **网络切换去重**：Android 切网络时 `NetworkCallback` 会连续触发多次，导致服务层在
+  同一网络类型下反复「重新选择链路」（实测 18:44:14 切蜂窝后 18:44:28 又误触发一次，
+  打断中转链路、诱发死循环）。现在 `NetworkWatcher` 只在网络类型真正变化时通知订阅者。
+- **切链路前清对端信息**：蜂窝→WiFi 切换后若新直连客户端迟迟未接入，界面会一直卡在
+  旧的「已连接：中转服务器:5000」。现在切链路前先 `clearPeerInfo` 清空对端并广播断开，
+  界面立即回到「等待连接」。
+
 ## [v1.5.39] - 2026-10-07
 
 ### Fixed
