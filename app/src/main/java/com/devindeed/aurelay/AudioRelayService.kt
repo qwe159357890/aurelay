@@ -188,6 +188,11 @@ class AudioRelayService : Service() {
         // 网络切换时自动切换链路：WiFi 走局域网直连，蜂窝走服务器中转
         NetworkWatcher.addListener { type ->
             DiagLog.i("服务", "检测到网络切换：$type，重新选择链路")
+            // 切链路前先清掉上一链路残留的对端信息：否则「蜂窝→WiFi」切换后，
+            // 若新的直连客户端迟迟没接进来，界面会一直卡在旧的
+            // 「已连接：中转服务器:5000」，让用户误以为模式没切。
+            // 清空后界面立即回到「等待连接」，等新链路真连上再显示新对端。
+            clearPeerInfo("网络切换")
             if (type == NetworkWatcher.NetType.WIFI) {
                 stopRelayLink()
                 startLanServer()
@@ -195,6 +200,22 @@ class AudioRelayService : Service() {
                 stopLanServer()
                 startRelayLink()
             }
+        }
+    }
+
+    // 清空对端信息并广播断开（切链路 / 停止会话时调用，让界面及时回到「等待连接」）
+    private fun clearPeerInfo(reason: String) {
+        lastClientIp = ""
+        lastClientName = ""
+        try {
+            val bcast = Intent("com.devindeed.aurelay.CLIENT_CONNECTION")
+            bcast.setPackage(packageName)
+            bcast.putExtra("connected", false)
+            bcast.putExtra("client_ip", "")
+            sendBroadcast(bcast)
+            DiagLog.i("连接", "已清空对端信息（$reason）")
+        } catch (ex: Exception) {
+            DiagLog.w("连接", "广播断开失败（$reason）：${ex.message}")
         }
     }
 
@@ -1017,29 +1038,25 @@ class AudioRelayService : Service() {
         if (magic == STREAM_MAGIC && (header[4].toInt() and 0xFF) == STREAM_VERSION) {
             return header
         }
-        // 包头已读满 8 字节，却没有匹配自研魔数 → 确实是别的协议，退回裸 PCM。
+        // 包头已读满 8 字节，却没有匹配自研魔数。
         //
-        // ⚠️ 但有一种例外必须拦下来：**经中转时读到了旧会话残留的音频帧**
-        // （实测 10:44:42 读到 `00 00 00 d8 fc 61 3c 7a`，开头就没有 AURL 包头）。
-        // 那是PC 端还没重连就发过来的旧流，正确的流不该长这样。
-        // 此时按裸 PCM 播放必然失真（把 48kHz 的 Opus 当 44.1kHz 裸 PCM），
-        // 所以这种情况直接放弃本次会话、让链路重连，而不是硬播。
+        // 直连：确实是别的协议（官方裸 PCM），退回裸 PCM 处理。
+        //
+        // ⚠️ 中转：这里极可能是「旧会话残留帧」或「包头被 WebSocket 帧边界拆散」
+        // 抢先到达，绝不能据此 forceReconnect！
+        //
+        // 实测血泪（18:45 死循环）：服务端「R 重接入/下线清 S」异步 close 旧 S 时，
+        // 旧 S 已排队的 Opus 帧仍会被转发给手机，于是手机 readHeader 读满 8 字节
+        // 读到的却是 `01 01 02 01 00 00 00 f7`（缺前 4 字节魔数 "AURL" 的后半段），
+        // 旧代码据此「判定旧会话残留 → forceReconnect」→ R 重连 → 服务端又清 S →
+        // PC 又重连 → 又发包头 → 又被残留帧抢先 → 又误判…… 三方共振死循环，
+        // 实测每秒重连 1~2 次、永远凑不齐稳定窗口，完全无声音。
+        //
+        // 正确做法：**扫描魔数**——逐字节跳过残留，直到定位到 "AURL" 魔数。
+        // 残留帧是有限的（旧 S 被 close 后不再产生新帧），跳过它就能接上真正
+        // 的包头，链路自然恢复，无需重建连接。
         if (isRelayPeer) {
-            DiagLog.e(
-                "协议",
-                "中转链路读到无包头的音频数据（${header.joinToString(" ") { "%02x".format(it) }}），" +
-                    "判定为旧会话残留，放弃本次连接等待重连"
-            )
-            // 标记「包头未收全」：让上层放弃本次会话，而不是把残留的 Opus 裸帧
-            // 当成 44.1kHz 裸 PCM 播放（那是「停止再开始后严重失真」的元凶之一）。
-            headerIncomplete = true
-            // ⚠️ 主动强制重连：光「放弃本次会话」不够——上层 relayThread 的
-            // while(isRunning) 会立刻再次消费**同一条还没读到底的管道**，又读到
-            // 下一段残留帧 → 再放弃 → 无限循环（实测 15:11:50~58 每秒 60+ 次，
-            // 状态文字「连接成功/失败」高频闪屏）。强制重连会关闭当前 WebSocket、
-            // 丢弃旧管道，重连成功后重建干净管道，新数据才是正经 AURL 包头。
-            relayClient.forceReconnect()
-            return null
+            return scanRelayMagic(input, header)
         }
 
         DiagLog.w(
@@ -1047,6 +1064,95 @@ class AudioRelayService : Service() {
             "未检测到 AURL 包头（读到 ${header.joinToString(" ") { "%02x".format(it) }}），按官方裸 PCM 处理"
         )
         input.unread(header, 0, HEADER_SIZE)
+        return null
+    }
+
+    // 中转链路上扫描 AURL 魔数：逐字节跳过残留，直到找到合法包头或超时放弃
+    private fun scanRelayMagic(input: PushbackInputStream, first: ByteArray): ByteArray? {
+        // 把已读满的 8 字节先推回，用统一的「逐字节找魔数」循环从头扫
+        input.unread(first, 0, first.size)
+        // 4 字节滑动窗口（复用数组，避免每次 new String 的开销）
+        val win = ByteArray(4)
+        var winLen = 0
+        var skipped = 0
+        var idleMillis = 0L
+        // 最多扫 64KB 残留 + 超时兜底，避免无限循环
+        val maxSkip = 64 * 1024
+        while (skipped < maxSkip) {
+            if (!isServerRunning) {
+                headerIncomplete = true
+                return null
+            }
+            val b: Int
+            try {
+                b = input.read()
+            } catch (e: java.net.SocketTimeoutException) {
+                idleMillis += 100
+                if (idleMillis >= IDLE_TIMEOUT_MS) {
+                    headerIncomplete = true
+                    return null
+                }
+                continue
+            }
+            if (b < 0) {
+                headerIncomplete = true
+                return null
+            }
+            idleMillis = 0
+            skipped++
+            // 维护 4 字节滑动窗口，比对 "AURL"（41 55 52 4c）
+            if (winLen < 4) {
+                win[winLen] = b.toByte()
+                winLen++
+            } else {
+                // 左移一位，末位补新字节
+                win[0] = win[1]
+                win[1] = win[2]
+                win[2] = win[3]
+                win[3] = b.toByte()
+            }
+            if (winLen == 4 && win[0] == 'A'.code.toByte() && win[1] == 'U'.code.toByte() &&
+                win[2] == 'R'.code.toByte() && win[3] == 'L'.code.toByte()
+            ) {
+                // 找到魔数，读剩余 4 字节包头
+                val rest = ByteArray(4)
+                var filled = 0
+                while (filled < 4) {
+                    if (!isServerRunning) {
+                        headerIncomplete = true
+                        return null
+                    }
+                    try {
+                        val n = input.read(rest, filled, 4 - filled)
+                        if (n < 0) {
+                            headerIncomplete = true
+                            return null
+                        }
+                        filled += n
+                    } catch (e: java.net.SocketTimeoutException) {
+                        idleMillis += 100
+                        if (idleMillis >= IDLE_TIMEOUT_MS) {
+                            headerIncomplete = true
+                            return null
+                        }
+                    }
+                }
+                val full = ByteArray(HEADER_SIZE)
+                System.arraycopy("AURL".toByteArray(Charsets.US_ASCII), 0, full, 0, 4)
+                System.arraycopy(rest, 0, full, 4, 4)
+                if ((full[4].toInt() and 0xFF) == STREAM_VERSION) {
+                    if (skipped > 4) {
+                        DiagLog.i("协议", "中转链路跳过 ${skipped - 4} 字节残留后定位到 AURL 包头")
+                    }
+                    return full
+                }
+                // 版本号不对：不是我们的包头，把这 4 字节当作残留直接丢弃，
+                // 清空窗口继续向后扫（不再 unread，避免超出 8 字节 pushback 容量）。
+                winLen = 0
+            }
+        }
+        DiagLog.e("协议", "中转链路扫描 $maxSkip 字节仍未找到 AURL 包头，放弃本次会话")
+        headerIncomplete = true
         return null
     }
 
