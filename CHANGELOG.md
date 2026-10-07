@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.45] - 2026-10-07
+
+### Added
+- **链路模式三档设置**（设置页「连接」分组新增「链路模式」单选，取代原先
+  「按网络类型强制自动切换」）：
+  - `自动`（默认）：WiFi→局域网直连、蜂窝→服务器中转（与原逻辑一致）
+  - `强制局域网`：无视网络类型，只监听 5000 端口等电脑直连
+  - `强制中转`：无视网络类型，始终主动出站连中转服务器
+  - 动机：原先手机连 WiFi 就强制走局域网直连，若电脑不在手机所在局域网
+    （访客 WiFi / AP 隔离 / 异地），电脑永远连不上手机。新增手动模式后，
+    用户可选「强制中转」绕开这一盲区。
+- 实现要点：
+  - `AppPrefs` 新增 `KEY_LINK_MODE` 及 `LINK_MODE_AUTO/LAN/RELAY` 常量
+  - `AudioRelayService` 新增 `resolveLinkMode()`：用户模式优先，`auto` 才按
+    网络类型决策；`startByNetwork` 改为「先停旧链路再启新链路」保证互斥
+  - `setupNetworkWatcher` 的网络切换回调、`linkSelfCheckLoop` 周期自检，
+    在用户强制 lan/relay 时不再随网络类型自动纠偏（避免把用户强制的中转
+    又拽回 WiFi 直连）
+  - 设置页保存后，若链路模式变化且接收服务正在运行，发 start 让服务重走
+    `startByNetwork()` 即时生效
+
 ## [v1.5.44] - 2026-10-07
 
 ### Fixed

@@ -210,7 +210,9 @@ class AudioRelayService : Service() {
      * :return: 无返回值
      */
     private fun setupNetworkWatcher() {
-        // 网络切换时自动切换链路：WiFi 走局域网直连，蜂窝走服务器中转
+        // 网络切换时按「链路模式」重新选择链路：auto 下 WiFi 走局域网直连、
+        // 蜂窝走服务器中转；用户强制 lan/relay 时，网络切换不改变链路
+        // （但仍会清对端信息，让界面回到「等待连接」）。
         NetworkWatcher.addListener { type ->
             DiagLog.i("服务", "检测到网络切换：$type，重新选择链路")
             // 切链路前先清掉上一链路残留的对端信息：否则「蜂窝→WiFi」切换后，
@@ -218,12 +220,27 @@ class AudioRelayService : Service() {
             // 「已连接：中转服务器:5000」，让用户误以为模式没切。
             // 清空后界面立即回到「等待连接」，等新链路真连上再显示新对端。
             clearPeerInfo("网络切换")
-            if (type == NetworkWatcher.NetType.WIFI) {
-                stopRelayLink()
-                startLanServer()
-            } else {
-                stopLanServer()
-                startRelayLink()
+            // 用户强制模式：网络切换不重选链路（保持 lan 或 relay 不变），
+            // 只重连当前链路。仅 auto 模式才随网络类型切换。
+            val userMode = AppPrefs.getString(this, AppPrefs.KEY_LINK_MODE, AppPrefs.LINK_MODE_AUTO)
+            when (userMode) {
+                AppPrefs.LINK_MODE_LAN -> {
+                    stopRelayLink()
+                    startLanServer()
+                }
+                AppPrefs.LINK_MODE_RELAY -> {
+                    stopLanServer()
+                    startRelayLink()
+                }
+                else -> {
+                    if (type == NetworkWatcher.NetType.WIFI) {
+                        stopRelayLink()
+                        startLanServer()
+                    } else {
+                        stopLanServer()
+                        startRelayLink()
+                    }
+                }
             }
         }
         // 周期自检兜底：网络回调可能漏报切换（见 linkSelfCheckThread 字段注释），
@@ -247,6 +264,12 @@ class AudioRelayService : Service() {
             }
             if (!linkSelfCheckRunning) break
             try {
+                // 用户强制模式（lan/relay）：链路由用户决定，网络类型与链路不符属正常，
+                // 这里不做纠偏（否则会把用户强制的中转又拽回 WiFi 直连，问题复现）。
+                val userMode = AppPrefs.getString(this, AppPrefs.KEY_LINK_MODE, AppPrefs.LINK_MODE_AUTO)
+                if (userMode == AppPrefs.LINK_MODE_LAN || userMode == AppPrefs.LINK_MODE_RELAY) {
+                    continue
+                }
                 val actual = NetworkWatcher.detect(this)
                 val currentMode = AppPrefs.getString(this, AppPrefs.KEY_LAST_LINK_MODE, "lan")
                 val expectLan = actual == NetworkWatcher.NetType.WIFI
@@ -482,15 +505,43 @@ class AudioRelayService : Service() {
     }
 
     /**
-     * 按当前网络类型选择链路：WiFi 走局域网直连，蜂窝走服务器中转
+     * 解析「当前应走的链路」：优先用户指定的模式，未指定（auto）才按网络类型自动决策
+     *
+     * 用户模式（AppPrefs.KEY_LINK_MODE）：
+     * - lan：强制局域网直连，无视网络类型（手机连着 WiFi 但电脑不在同一局域网时
+     *   用户可能误设，但这是用户显式选择，遵循即可）
+     * - relay：强制服务器中转，无视网络类型（解决「手机 WiFi + 电脑异地」连不上的问题）
+     * - auto / 空：按网络类型自动决策（WiFi→直连，蜂窝/其它→中转）
+     *
+     * :return: 应走的链路，取值 "lan" 或 "relay"
+     */
+    private fun resolveLinkMode(): String {
+        val userMode = AppPrefs.getString(this, AppPrefs.KEY_LINK_MODE, AppPrefs.LINK_MODE_AUTO)
+        return when (userMode) {
+            AppPrefs.LINK_MODE_LAN -> "lan"
+            AppPrefs.LINK_MODE_RELAY -> "relay"
+            else -> {
+                val type = NetworkWatcher.refresh(this)
+                if (type == NetworkWatcher.NetType.WIFI) "lan" else "relay"
+            }
+        }
+    }
+
+    /**
+     * 按链路模式选择链路：auto 按网络类型、lan/relay 按用户强制
+     *
+     * 先停掉旧链路、再启动新链路，保证两链路互斥（避免「局域网直连」与
+     * 「服务器中转」同时监听/出站，产生并发写音轨的错乱）。
      *
      * :return: 无返回值
      */
     private fun startByNetwork() {
-        val type = NetworkWatcher.refresh(this)
-        when (type) {
-            NetworkWatcher.NetType.WIFI -> startLanServer()
-            else -> startRelayLink()
+        if (resolveLinkMode() == "lan") {
+            stopRelayLink()
+            startLanServer()
+        } else {
+            stopLanServer()
+            startRelayLink()
         }
     }
 

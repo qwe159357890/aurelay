@@ -1561,6 +1561,8 @@ fun AurelayApp(
         // 中转配置
         var tempRelayServer by remember { mutableStateOf(prefs.getString(AppPrefs.KEY_RELAY_SERVER, AppPrefs.DEFAULT_RELAY_SERVER) ?: AppPrefs.DEFAULT_RELAY_SERVER) }
         var tempRelayEnabled by remember { mutableStateOf(prefs.getBoolean(AppPrefs.KEY_RELAY_ENABLED, true)) }
+        // 链路模式（三档：auto / lan / relay）
+        var tempLinkMode by remember { mutableStateOf(prefs.getString(AppPrefs.KEY_LINK_MODE, AppPrefs.LINK_MODE_AUTO) ?: AppPrefs.LINK_MODE_AUTO) }
         // 外网地址上报相关临时状态（保存后才落盘）
         var tempReportEnabled by remember { mutableStateOf(prefs.getBoolean(AddressReporter.KEY_ENABLED, false)) }
         var tempReportUrl by remember { mutableStateOf(prefs.getString(AddressReporter.KEY_URL, "") ?: "") }
@@ -1641,6 +1643,56 @@ fun AurelayApp(
                             checked = tempRelayEnabled,
                             onCheckedChange = { tempRelayEnabled = it }
                         )
+                    }
+
+                    HorizontalDivider()
+
+                    // 链路模式（三档：自动 / 强制局域网 / 强制中转）
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "链路模式",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = "自动：WiFi 走局域网、蜂窝走中转；手机连 WiFi 但电脑不在同一局域网时，可选「强制中转」",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        // 三个单选，映射到 AppPrefs.LINK_MODE_*
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            listOf(
+                                Triple(AppPrefs.LINK_MODE_AUTO, "自动", "按网络类型自动切换（推荐）"),
+                                Triple(AppPrefs.LINK_MODE_LAN, "强制局域网", "只监听 5000 端口，等电脑直连（电脑须在同一局域网）"),
+                                Triple(AppPrefs.LINK_MODE_RELAY, "强制中转", "始终经服务器转发（电脑异地 / 访客 WiFi / AP 隔离时用）")
+                            ).forEach { (value, title, desc) ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { tempLinkMode = value }
+                                        .padding(vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = tempLinkMode == value,
+                                        onClick = { tempLinkMode = value }
+                                    )
+                                    Column(modifier = Modifier.padding(start = 8.dp)) {
+                                        Text(
+                                            text = title,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                        Text(
+                                            text = desc,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     HorizontalDivider()
@@ -1956,6 +2008,8 @@ fun AurelayApp(
             confirmButton = {
                 TextButton(
                     onClick = {
+                        // 链路模式若发生变化，服务端需重选链路（在保存前记下旧值）
+                        val oldLinkMode = prefs.getString(AppPrefs.KEY_LINK_MODE, AppPrefs.LINK_MODE_AUTO) ?: AppPrefs.LINK_MODE_AUTO
                         // Save settings
                         prefs.edit().apply {
                             putBoolean(AppPrefs.KEY_AUTO_START, tempAutoStart)
@@ -1964,10 +2018,25 @@ fun AurelayApp(
                             putBoolean(AppPrefs.KEY_KEEP_ALIVE_SILENT_PLAY, tempSilentPlay)
                             putString(AppPrefs.KEY_RELAY_SERVER, tempRelayServer.trim())
                             putBoolean(AppPrefs.KEY_RELAY_ENABLED, tempRelayEnabled)
+                            putString(AppPrefs.KEY_LINK_MODE, tempLinkMode)
                             putBoolean(AddressReporter.KEY_ENABLED, tempReportEnabled)
                             putString(AddressReporter.KEY_URL, tempReportUrl.trim())
                             putString(AddressReporter.KEY_TOKEN, tempReportToken.trim())
                             apply()
+                        }
+
+                        // 链路模式变了且接收服务正在运行：发一条 start 给 AudioRelayService，
+                        // 让它重走 startByNetwork() 按新模式重选链路（auto 也会即时生效）。
+                        // 服务未运行时不动它，避免用户只在设置里改模式却意外把服务拉起来。
+                        if (tempLinkMode != oldLinkMode && isServiceRunning) {
+                            try {
+                                ContextCompat.startForegroundService(
+                                    context,
+                                    Intent(context, AudioRelayService::class.java)
+                                )
+                            } catch (e: Exception) {
+                                Log.e("Aurelay", "重选链路失败：${e.message}")
+                            }
                         }
 
                         // 保活三开关与地址上报统一交由 KeepAliveService 立即生效：

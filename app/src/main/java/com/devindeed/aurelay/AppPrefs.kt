@@ -44,6 +44,17 @@ object AppPrefs {
     // 中转服务器地址（形如 039039.xyz:15151）
     const val KEY_RELAY_SERVER = "relay_server"
 
+    // 链路模式（用户可选三档，取代原先「按网络类型强制自动切换」）：
+    //   auto 自动（WiFi→局域网直连、蜂窝→服务器中转，默认）
+    //   lan  强制局域网直连（无视网络类型，只监听 5000 端口等电脑接入）
+    //   relay 强制服务器中转（无视网络类型，主动出站连中转服务器）
+    // 用途：手机连着 WiFi 但电脑不在同一局域网（如访客 WiFi / AP 隔离 / 异地）时，
+    // 自动模式会误判「WiFi 就该直连」导致电脑永远连不上，用户可手动强制中转绕开。
+    const val KEY_LINK_MODE = "link_mode"
+    const val LINK_MODE_AUTO = "auto"
+    const val LINK_MODE_LAN = "lan"
+    const val LINK_MODE_RELAY = "relay"
+
     // 历史电脑列表（JSON 数组，上限 10 条）
     const val KEY_DEVICES_JSON = "devices_json"
 
