@@ -112,7 +112,8 @@ class RelayClient {
         if (running) return
         val app = context.applicationContext
         val server = AppPrefs.getString(app, AppPrefs.KEY_RELAY_SERVER, AppPrefs.DEFAULT_RELAY_SERVER)
-        val cleaned = server.removePrefix("ws://").removePrefix("wss://")        val separator = cleaned.lastIndexOf(':')
+        val cleaned = server.removePrefix("ws://").removePrefix("wss://")
+        val separator = cleaned.lastIndexOf(':')
         host = if (separator > 0) cleaned.substring(0, separator) else cleaned
         port = if (separator > 0) cleaned.substring(separator + 1).toIntOrNull() ?: 15151 else 15151
         // ⚠️ url 字段此前**从未被赋值**，而 connectOnce() 直接拿它建 WebSocket，
