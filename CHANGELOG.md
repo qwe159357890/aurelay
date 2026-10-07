@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.44] - 2026-10-07
+
+### Fixed
+- **PC 端静音时「每 20 秒自动重启」的根治（本次 20:48~20:50 事故）**：PC 端静音后
+  Opus 进入 DTX 帧率暴跌（50/s→16/s），此时 PC 若重连会在推流中途重发一次 8 字节
+  AURL 包头，手机端 `readFrame` 把这 4 字节魔数 `41 55 52 4c` 误当「帧长度」
+  （0x4155524c=1095914060 超上限）判为非法、结束会话；上层消费循环再用同一根管道
+  重扫时，包头前 4 字节已被读走，`scanRelayMagic` 扫满 64KB 也拼不回完整魔数 →
+  触发 `forceReconnect` → 服务端清 S → PC 重连又重发包头 → 再次截断，每 20 秒震荡
+  一轮。修复：
+  - `readFrame` 检测到长度字段恰为 AURL 魔数时，判定为「PC 重连重发的新包头」，
+    读完后 4 字节包头参数并跳过，继续解析后续同样格式的 Opus 帧（不再中断会话、
+    不再重连）。
+  - `scanRelayMagic` 读到 EOF（对端已断开、管道已关闭）时置 `relayHeaderEof`，
+    `onRelayHeaderMissed` 据此静默返回、不再 `forceReconnect`——对端断开会由
+    onClosed/onFailure 自动重连，主动关连接只会「自己关自己」加剧震荡。
+
 ## [v1.5.43] - 2026-10-07
 
 ### Fixed
