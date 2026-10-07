@@ -361,6 +361,19 @@ object ResourceHolder {
                     DiagLog.i("保活", "网络丢失")
                     NetworkWatcher.onSystemNetworkChanged(context)
                 }
+
+                override fun onCapabilitiesChanged(
+                    network: android.net.Network,
+                    capabilities: NetworkCapabilities
+                ) {
+                    // 网络能力变化（如 WiFi→蜂窝、IPv4/IPv6 变化）也触发链路决策。
+                    // 实测 19:18 事故：OnePlus/Android 14 切蜂窝时 WiFi 网络未必
+                    // 立即 onLost，而蜂窝网络的 onCapabilitiesChanged 先到；缺了这个
+                    // 回调，NetworkWatcher 根本收不到「已切蜂窝」的信号，链路永远
+                    // 停在 WIFI 直连、中转 R 从不启动。
+                    DiagLog.i("保活", "网络能力变化")
+                    NetworkWatcher.onSystemNetworkChanged(context)
+                }
             }
             cm.registerNetworkCallback(request, callback)
             networkCallback = callback
