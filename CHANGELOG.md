@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.32] - 2026-10-07
+
+### Fixed
+- **停止/开始后声音严重失真，且电脑静音时音量条仍起伏**（本条是重点）：
+  `readHeader()` 返回 `null` 原本混用了两种含义——「等包头超时/连接中断」与
+  「确实是官方裸 PCM」——上层一律按裸 PCM 处理。经中转时首帧常只到几个字节
+  就遇上抖动，等满 `IDLE_TIMEOUT_MS` 后旧代码退回已读字节并返回 null，
+  于是 **48kHz 的 Opus 被按 44.1kHz 裸 PCM 播放**，听感即严重失真；
+  电脑没声音时，噪声底也会被一起放大成起伏的嗡嗡声。
+  现在新增 `headerIncomplete` 标志区分这两条路径，包头没读够就放弃本次会话，
+  绝不按裸 PCM 处理。
+- **常驻通知可被划走**：`startForeground` 只在 `onCreate` 调一次，之后一律用
+  `notify()` 刷新——那是**普通通知**，服务一旦被系统降级就不再受前台服务保护。
+  现在每次刷新都重新走 `startForeground`，并在低版本追加 `FLAG_ONGOING_EVENT`
+  （部分国产 ROM 不完全理会 `setOngoing`）。
+
+### Changed
+- **电脑放音通知（`AudioCaptureService`，通知 ID 1002）也改成两行式**：
+  「正在推送电脑声音 / 麦克风已推送到电脑 · 点此管理」，去掉长句与
+  `setUsesChronometer` 时间戳列（那列会把两行式挤歪）。
+  此前只有 `AudioRelayService` 的两条通知被改，电脑放音这条一直是旧文案。
+- **中转包头误判时打印十六进制原文**，便于事后定位。
+
+### 注意
+- 本版包含 v1.5.31 的全部改动（中转重连、立即上报、中转回显已连接、运行时长显示）。
+  若此前安装的仍是 v1.5.30，通知文案与不可划走的效果都还没生效。
+
 ## [v1.5.31] - 2026-10-07
 
 ### Fixed

@@ -636,16 +636,19 @@ class AudioCaptureService : Service() {
         val contentIntent = PendingIntent.getActivity(this, 1, openApp, flags)
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Aurelay 正在推送")
-            .setContentText("麦克风声音正在推送到电脑，打开应用可停止")
+            // 两行式（借鉴 MicYou）：标题=状态，正文=极短动作提示。
+            // 原先那句「麦克风声音正在推送到电脑，打开应用可停止」太长，
+            // 在通知栏会被系统提示挤成两行小字，很难读。
+            .setContentTitle("正在推送电脑声音")
+            .setContentText("麦克风已推送到电脑 · 点此管理")
             .setSmallIcon(com.devindeed.aurelay.R.mipmap.ic_launcher)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setOngoing(true)
-            // 显示从服务启动时刻起的计时（持续运行时间）
-            .setShowWhen(true)
-            .setUsesChronometer(true)
-            .setWhen(serviceStartAt)
+            .setOnlyAlertOnce(true)
+            // 隐藏时间戳与计时器：右��那一列会把两行式挤歪，
+            // 运行时长改由 App 界面的「已连续运行 X」显示
+            .setShowWhen(false)
             .setContentIntent(contentIntent)
             .build()
     }

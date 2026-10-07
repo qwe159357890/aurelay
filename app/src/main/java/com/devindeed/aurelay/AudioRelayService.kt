@@ -16,7 +16,9 @@ import android.os.Build
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import androidx.core.content.ContextCompat
+import androidx.core.app.ServiceCompat
 import android.annotation.SuppressLint
 import android.os.IBinder
 import android.support.v4.media.session.MediaSessionCompat
@@ -52,6 +54,11 @@ class AudioRelayService : Service() {
     private var relayThread: Thread? = null
     private var useTls: Boolean = false // Default to plain TCP for easier testing (change to true for production TLS)
     private var audioTrack: AudioTrack? = null
+
+    // readHeader 因「包头没读够就超时」而放弃时置位。
+    // 上层据此区分「放弃本次会话」与「这是官方裸 PCM」—— 混为一谈会把
+    // 48kHz 的 Opus 按 44.1kHz 裸 PCM 播放，听感即严重失真。
+    @Volatile private var headerIncomplete: Boolean = false
 
     // 当前一路客户端会话的 socket（用于「停止会话」时主动关闭，见 stopAudioSession）
     @Volatile private var currentClientSocket: Socket? = null
@@ -582,6 +589,7 @@ class AudioRelayService : Service() {
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .setOngoing(true)
                 .setShowWhen(true)
+                .setShowWhen(true)
                 .setUsesChronometer(true)
                 .setWhen(serviceStartAt)
                 .setContentIntent(openAppPendingIntent)
@@ -773,7 +781,19 @@ class AudioRelayService : Service() {
         SilentPlayer.setScenarioAllowed(this, false)
         try {
             val input = PushbackInputStream(rawInput, HEADER_SIZE)
+            // 每次会话开始前清掉上一轮的判定结果
+            headerIncomplete = false
             val header = readHeader(input)
+            // readHeader 返回 null 有两种含义，必须区分：
+            //   · 包头没读够就超时（headerIncomplete）→ 本次连接直接结束；
+            //   · 读满 8 字节但魔数不对 → 是真的官方裸 PCM，继续按PCM 处理。
+            // 旧实现把两者都当成裸 PCM，于是「等包头超时」会把 48kHz 的 Opus
+            // 按 44.1kHz 裸 PCM 播放 —— 每切换一次停止/开始就多踩一次，
+            // 听感是失真越来越重，且电脑静音时噪声底被放大成起伏的嗡嗡声。
+            if (header == null && headerIncomplete) {
+                DiagLog.w("协议", "流包头未收全，放弃本次会话（不按裸 PCM 处理）")
+                return
+            }
 
             var framed = false
             var codec = CODEC_PCM
@@ -891,9 +911,25 @@ class AudioRelayService : Service() {
             // notify() 刷出来的是一条**普通通知**：一旦服务被系统降级到后台
             // （点过一次停止、或被其他 App 抢占资源），它就不再受前台服务保护，
             // 用户可以随手划掉——实测就是这样丢掉常驻通知的。
-            // startForeground 会把同ID 的通知重新拉回「前台服务通知」，不可划走。
+            // startForeground 会把同 ID 的通知重新拉回「前台服务通知」，不可划走。
+            //
+            // 再叠一层 FLAG_ONGOING_EVENT：部分国产 ROM 不完全理会
+            // setOngoing(true)，带上这个 flag 才会稳定变成不可划走。
             try {
-                startForeground(NOTIFICATION_ID, buildNotification())
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    ServiceCompat.startForeground(
+                        this,
+                        NOTIFICATION_ID,
+                        buildNotification(),
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                    )
+                } else {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        buildNotification(),
+                        android.content.pm.ServiceInfo.FLAG_ONGOING_EVENT
+                    )
+                }
             } catch (e: Exception) {
                 Log.w("AudioRelay", "startForeground 刷新失败，退回 notify：${e.message}")
                 @SuppressLint("MissingPermission")
@@ -904,7 +940,14 @@ class AudioRelayService : Service() {
         }
     }
 
-    // 读取 8 字节流包头：命中自研魔数返回包头，否则把已读字节退回并按官方裸 PCM 处理
+    // 读取 8 字节流包头：命中自研魔数返回包头，读满但魔数不对则退回官方裸 PCM    //
+    // 【关键】必须区分两种「失败」：
+    //   · 一个字节都没读到（超时 / EOF / 服务停止）→ 不算裸 PCM，直接放弃本次会话；
+    //   · 读满了 8 字节但魔数不对→ 确实是官方裸 PCM，正常退回。
+    // 混为一谈会让 48kHz 的 Opus 被按 44.1kHz 裸 PCM 播放（听感即严重失真）。
+    //
+    // @param input: 带 8 字节回退缓冲的输入流
+    // @return: AURL 包头字节数组；放弃会话时返回 null
     private fun readHeader(input: PushbackInputStream): ByteArray? {
         val header = ByteArray(HEADER_SIZE)
         var filled = 0
@@ -914,6 +957,7 @@ class AudioRelayService : Service() {
             try {
                 val n = input.read(header, filled, HEADER_SIZE - filled)
                 if (n < 0) {
+                    // 对端已关闭，一个字节都没拿到：不是裸 PCM
                     if (filled > 0) input.unread(header, 0, filled)
                     return null
                 }
@@ -924,6 +968,10 @@ class AudioRelayService : Service() {
                 if (idleMillis >= IDLE_TIMEOUT_MS) {
                     if (filled > 0) input.unread(header, 0, filled)
                     Log.w("AudioRelay", "等待流包头超时，放弃该连接")
+                    // 只读到了零头字节，**不能**退回裸 PCM：
+                    // 上层会把 null 一律当官方裸 PCM，于是把 48kHz 的 Opus
+                    // 按 44.1kHz 播—— 越反复停止/开始，失真越明显。
+                    headerIncomplete = true
                     return null
                 }
             }
@@ -932,11 +980,7 @@ class AudioRelayService : Service() {
         if (magic == STREAM_MAGIC && (header[4].toInt() and 0xFF) == STREAM_VERSION) {
             return header
         }
-        // 非自研协议：退回字节，走官方裸 PCM 分支。
-        // 这里必须把「读到的到底是什么」记进日志：一旦误判，手机会按 44.1kHz 裸 PCM
-        // 去播48kHz 的 Opus 数据，码率会从~976kbps掉到 100kbps 上下，听感就是严重失真。
-        // 实测 09:37 手机侧多次出现「未检测到 AURL 包头」，而 PC 端当时正在并发竞速
-        // 探测（IPv6 直连 + 中转同时试），先到的那条流是探测流。
+        // 包头已读满 8 字节，却没有匹配自研魔数 → 确实是别的协议，退回裸 PCM。
         DiagLog.w(
             "协议",
             "未检测到 AURL 包头（读到 ${header.joinToString(" ") { "%02x".format(it) }}），按官方裸 PCM 处理"
