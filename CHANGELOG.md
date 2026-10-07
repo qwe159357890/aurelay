@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.39] - 2026-10-07
+
+### Fixed
+- **切蜂窝后中转「已连上」却立即「流包头未收全」放弃的竞态根治**：`RelayClient.start()`
+  原先会先 `rebuildPipe()` 建一条管道，紧接着 `connectOnce()` 的 `onOpen` 回调又
+  `rebuildPipe()` 把这条管道关掉——而 `startRelayLink` 的消费线程此刻正阻塞在这条
+  管道上读，于是读到 EOF、误判「流包头未收全」而放弃（实测切蜂窝后「已连上中转服务器」
+  与「流包头未收全」落在同一毫秒）。现在去掉 `start()` 里的 `rebuildPipe()`，管道统一
+  由 `onOpen` 回调负责重建：首次连接在 `onOpen` 前 `audioInput()` 返回 null，消费线程
+  会 sleep 等待，`onOpen` 建好管道后自然开始消费，干净无竞态。（配合 PC 端「直连优先、
+  中转串行 + 409 短退避」一起打破切网络后的震荡死循环。）
+
 ## [v1.5.38] - 2026-10-07
 
 ### Fixed
