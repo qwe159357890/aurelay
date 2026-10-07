@@ -15,8 +15,8 @@ android {
         applicationId = "com.devindeed.aurelay"
         minSdk = 24
         targetSdk = 36
-        versionCode = 39
-        versionName = "1.5.37"
+        versionCode = 40
+        versionName = "1.5.38"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
