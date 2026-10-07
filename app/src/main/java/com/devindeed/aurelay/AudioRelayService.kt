@@ -429,6 +429,12 @@ class AudioRelayService : Service() {
         }
         saveLinkMode("relay")
         broadcastLinkMode("relay")
+        // 中转链路同样是「接收中」，必须把 isServerRunning 置回 true。
+        // 切蜂窝时 NetworkWatcher 会先 stopLanServer()（把它置 false），
+        // 若这里不复位，中转 handleStream 里的 while(isServerRunning) /
+        // if(!isServerRunning) 会立即退出，一个字节都收不到——这正是实测
+        // 「12:56 之后手机 0 秒就结束、全程无声音」的直接根因。
+        isServerRunning = true
         // 中转流还活着（线程在跑、客户端在运行态）：跳过，避免重复出站
         if (relayThread != null && relayThread!!.isAlive && relayClient.isRunning()) return
         // 「停止」后再点「开始」：旧线程可能还阻塞在中转管道的读上，先等它退场
@@ -448,8 +454,21 @@ class AudioRelayService : Service() {
         relayThread = Thread({
             try {
                 relayClient.start(this@AudioRelayService, RelayProtocol.ROLE_RECEIVER, AUDIO_PORT)
-                val input = relayClient.audioInput()
-                if (input != null) {
+                // 中转客户端断线会自动重连，每次重连（onOpen）都会重建管道。
+                // 这里必须循环消费：handleStream 读完（读到 EOF）后，只要中转
+                // 客户端还在运行（可能正处于断线重连中），就继续等新流再消费，
+                // 否则「重连成功后没人读管道 → 手机完全没声音」（实测 12:56-12:58）。
+                while (relayClient.isRunning()) {
+                    val input = relayClient.audioInput()
+                    if (input == null) {
+                        // 断线重连中，管道尚未重建，稍等再试
+                        try {
+                            Thread.sleep(100)
+                        } catch (e: InterruptedException) {
+                            break
+                        }
+                        continue
+                    }
                     handleStream(input, "中转服务器")
                 }
             } catch (e: Exception) {
@@ -931,12 +950,21 @@ class AudioRelayService : Service() {
         var filled = 0
         var idleMillis = 0L
         while (filled < HEADER_SIZE) {
-            if (!isServerRunning) return null
+            if (!isServerRunning) {
+                // 服务已停止接收：这不是「官方裸 PCM」，标记放弃，避免上层误判。
+                headerIncomplete = true
+                return null
+            }
             try {
                 val n = input.read(header, filled, HEADER_SIZE - filled)
                 if (n < 0) {
-                    // 对端已关闭，一个字节都没拿到：不是裸 PCM
+                    // 对端已关闭 / 流提前结束：一个字节都没读到，或只读到零头。
+                    // 这绝不是「官方裸 PCM」——裸 PCM 流一开始就会连续有数据。
+                    // 必须标记 headerIncomplete，让上层放弃本次会话而非按裸 PCM
+                    // 处理，否则 streamRawPcm 会读到 EOF 立即退出，表现为
+                    // 「电脑端已连接 → 0 秒结束 → 全程无声音」。
                     if (filled > 0) input.unread(header, 0, filled)
+                    headerIncomplete = true
                     return null
                 }
                 filled += n
@@ -971,6 +999,9 @@ class AudioRelayService : Service() {
                 "中转链路读到无包头的音频数据（${header.joinToString(" ") { "%02x".format(it) }}），" +
                     "判定为旧会话残留，放弃本次连接等待重连"
             )
+            // 标记「包头未收全」：让上层放弃本次会话，而不是把残留的 Opus 裸帧
+            // 当成 44.1kHz 裸 PCM 播放（那是「停止再开始后严重失真」的元凶之一）。
+            headerIncomplete = true
             return null
         }
 
