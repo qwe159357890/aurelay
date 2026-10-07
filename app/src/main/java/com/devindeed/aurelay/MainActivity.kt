@@ -280,13 +280,17 @@ class MainActivity : ComponentActivity() {
         // Ensure the notification channel exists
         createNotificationChannel()
 
-        // ===== 常驻通知 + 保活（设计文档 8.3 第 4 项）=====
-        // 「点停止」只停音频会话、**不销毁服务**，通知随 App 运行全程常驻。
-        // 服务在才有前台通知，有前台通知才扛得住国产 ROM 的后台清理——
-        // 因此这里无条件拉起，不再受 auto_start_service 开关左右
-        // （该开关语义收窄为「开机自启」，见 BootReceiver）。
-        // 重复调用是幂等的：服务已在运行则只会再走一次 onStartCommand。
-        ContextCompat.startForegroundService(this, Intent(this, AudioRelayService::class.java))
+        // ===== 常驻通知 + 保活：无条件拉起 KeepAliveService =====
+        // 「点停止」只停音频会话、不销毁保活服务；常驻通知随 App 运行全程在。
+        // KeepAliveService 只负责通知 + 保活资源 + 地址上报，不碰音频——
+        // 因此这里无条件拉起，与任何开关无关（重复调用幂等）。
+        ContextCompat.startForegroundService(this, Intent(this, KeepAliveService::class.java))
+        // ===== 接收服务：由「自动启动服务」开关决定 =====
+        // 开关开：打开 App 即自动开始接收电脑声音；开关关：必须手动点「开始」。
+        // 与上面的常驻通知彻底解耦（两层独立）。
+        if (AppPrefs.getBoolean(this, AppPrefs.KEY_AUTO_START, false)) {
+            ContextCompat.startForegroundService(this, Intent(this, AudioRelayService::class.java))
+        }
         
         // Register broadcast receiver with proper flags for all Android versions
         val filter = IntentFilter().apply {
@@ -572,8 +576,8 @@ fun AurelayApp(
     // Get preferences
     val prefs = remember { PreferenceManager.getDefaultSharedPreferences(context) }
     // 可视化条与音量滑块固定常驻显示（设置项已删除）
-    // 注：KEY_AUTO_START 现仅管「开机自启」（BootReceiver），
-    //     App 打开后的前台服务是无条件常驻的，不再受它控制。
+    // 注：KEY_AUTO_START 管「打开 App 是否自动启动接收服务」；
+    //     常驻通知与保活由 KeepAliveService 无条件承担，与开关无关（两层独立）。
     val showVisualizer = true
     val showVolumeSlider = true
     // 电脑放音的音频输出固定为「远端」：手机只当电脑的麦克风，不自播
@@ -581,9 +585,10 @@ fun AurelayApp(
 
     // --- STATE ---
     var isBroadcastMode by remember { mutableStateOf(false) } // Default: Receiver Mode
-    // 常驻前台服务：onCreate 已无条件拉起接收服务（设计文档 8.3 第 4 项），
-    // 因此初值恒为 true。「停止」此后只停音频会话、不销毁服务，服务与通知全程在。
-    var isServiceRunning by remember { mutableStateOf(true) }
+    // 接收服务（AudioRelayService）是否运行，初值由「自动启动服务」开关决定：
+    // 开 = 打开 App 即自动开始接收；关 = 需手动点「开始」。
+    // 常驻通知与保活由 KeepAliveService 无条件承担，不受此开关影响。
+    var isServiceRunning by remember { mutableStateOf(AppPrefs.getBoolean(context, AppPrefs.KEY_AUTO_START, false)) }
     var volume by remember { mutableFloatStateOf(0.8f) }
     var isMuted by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
@@ -1556,87 +1561,6 @@ fun AurelayApp(
         // 中转配置
         var tempRelayServer by remember { mutableStateOf(prefs.getString(AppPrefs.KEY_RELAY_SERVER, AppPrefs.DEFAULT_RELAY_SERVER) ?: AppPrefs.DEFAULT_RELAY_SERVER) }
         var tempRelayEnabled by remember { mutableStateOf(prefs.getBoolean(AppPrefs.KEY_RELAY_ENABLED, true)) }
-                    HorizontalDivider()
-
-                    // 全程保活：20 项资源「App 运行即持有」
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "全程保活",
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                text = "App 运行期间持续持有各类锁与采集/监听资源，更费电但不易断线",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = tempKeepAliveAlways,
-                            onCheckedChange = { tempKeepAliveAlways = it }
-                        )
-                    }
-
-                    HorizontalDivider()
-
-                    // 一像素锚点（独立开关）
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "一像素锚点",
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                text = "锁屏时保留一个不可见的 1 像素窗口，降低被清理的概率",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = tempOnePixel,
-                            onCheckedChange = { tempOnePixel = it }
-                        )
-                    }
-
-                    HorizontalDivider()
-
-                    // 无声播放锚点（独立开关）
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "无声播放",
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                text = "空闲时循环播放听不到的音频；播放声音或录音时自动让位",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = tempSilentPlay,
-                            onCheckedChange = { tempSilentPlay = it }
-                        )
-                    }
-
-                    HorizontalDivider()
-
-
         // 外网地址上报相关临时状态（保存后才落盘）
         var tempReportEnabled by remember { mutableStateOf(prefs.getBoolean(AddressReporter.KEY_ENABLED, false)) }
         var tempReportUrl by remember { mutableStateOf(prefs.getString(AddressReporter.KEY_URL, "") ?: "") }
@@ -1752,7 +1676,87 @@ fun AurelayApp(
                             onCheckedChange = { tempAutoStart = it }
                         )
                     }
-                    
+
+                    HorizontalDivider()
+
+                    // 全程保活：20 项资源「App 运行即持有」
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "全程保活",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "App 运行期间持续持有各类锁与采集/监听资源，更费电但不易断线",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = tempKeepAliveAlways,
+                            onCheckedChange = { tempKeepAliveAlways = it }
+                        )
+                    }
+
+                    HorizontalDivider()
+
+                    // 一像素锚点（独立开关）
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "一像素锚点",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "锁屏时保留一个不可见的 1 像素窗口，降低被清理的概率",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = tempOnePixel,
+                            onCheckedChange = { tempOnePixel = it }
+                        )
+                    }
+
+                    HorizontalDivider()
+
+                    // 无声播放锚点（独立开关）
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "无声播放",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "空闲时循环播放听不到的音频；播放声音或录音时自动让位",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = tempSilentPlay,
+                            onCheckedChange = { tempSilentPlay = it }
+                        )
+                    }
+
+                    HorizontalDivider()
+
                     // 外网地址上报：把本机 IPv4/IPv6 定时同步到用户自己的中心服务器
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Row(
@@ -1966,31 +1970,21 @@ fun AurelayApp(
                             apply()
                         }
 
-                        // 保活三开关立即生效（不必重启 App）
+                        // 保活三开关与地址上报统一交由 KeepAliveService 立即生效：
+                        // 发一条 ACTION_REFRESH，让保活服务重新 applyKeepAlive + 按新配置
+                        // 重启地址上报，避免 MainActivity 直接操作资源产生双重持有/释放竞态。
                         try {
-                            if (tempKeepAliveAlways) {
-                                ResourceHolder.acquireAll(context)
-                            } else {
-                                ResourceHolder.releaseAll(context)
+                            val refresh = Intent(context, KeepAliveService::class.java).apply {
+                                action = KeepAliveService.ACTION_REFRESH
                             }
-                            if (tempOnePixel) OnePixelOverlay.show(context) else OnePixelOverlay.hide(context)
-                            SilentPlayer.applyEnabled(context)
-                        } catch (e: Exception) {
-                            Log.e("Aurelay", "应用保活设置失败：${e.message}")
-                        }
-
-                        // 地址上报配置变更后立即生效：先停旧的，再按新配置启动
-                        try {
-                            AddressReporter.stop(context)
+                            ContextCompat.startForegroundService(context, refresh)
                             if (tempReportEnabled && tempReportUrl.trim().isNotEmpty()) {
-                                AddressReporter.start(context)
-                                AddressReporter.reportNow(context)
                                 Toast.makeText(context, "已开启公网地址上报", Toast.LENGTH_SHORT).show()
                             } else {
                                 Toast.makeText(context, "已关闭公网地址上报", Toast.LENGTH_SHORT).show()
                             }
                         } catch (e: Exception) {
-                            Log.e("AurelayReport", "更新上报配置失败：${e.message}")
+                            Log.e("Aurelay", "应用保活设置失败：${e.message}")
                         }
                         
                         // 音频输出模式固定为「远端」（电脑放音 = 手机当电脑的麦克风，手机不自播），
