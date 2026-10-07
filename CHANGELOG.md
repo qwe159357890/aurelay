@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.33] - 2026-10-07
+
+### Fixed
+- **「停止 → 开始」后严重失真（真根因在服务端时序，上一版修错了地方）**：
+  手机点「停止」再点「开始」后会在中转房间重新注册为 R，而 PC 端那条连接还活着
+  （它要到下一次发送失败才会重连，实测滞后约 10 秒）。这 10 秒内 PC 继续把
+  **旧会话的音频帧**发给房间，服务端照单转发给刚上线的手机，于是手机读到的流
+  开头是 `00 00 00 d8 fc 61 3c 7a` —— 一帧裸 Opus 数据，压根没有 AURL 包头
+  （`41 55 52 4c`），只能被误判成 44.1kHz 裸 PCM 播放。
+  - **服务端**：接收方（R）重新接入时主动清理房间里残留的发送方（S）连接，
+    PC 会立刻收到 409 并重连，重连后才重新发 AURL 包头，顺序恢复正常。
+  - **App 端兜底**：`readHeader()` 增加 `isRelayPeer` 参数，中转链路上读到无包头
+    的数据一律放弃本次会话等待重连（PC 与手机之间只有 AURL 一种协议，
+    无包头必然是旧会话残留），不再按裸 PCM 硬播。
+- **常驻通知与手机放音通知仍可被划走、文案看起来没改**：
+  根因是两条通知都挂了 `NotificationCompat.MediaStyle()`。MediaStyle 会把通知
+  折叠成「媒体播放器」样式——两行文案被压成一行小字，而且部分国产 ROM 上
+  不遵守 ongoing 语义，于是就能随手划走。
+  现在两条通知都去掉 MediaStyle，并去掉 `setShowWhen`/`setUsesChronometer`
+  （右侧那列时间会把两行式挤歪；运行时长已由 App 界面的「已连续运行 X」承担）。
+
 ## [v1.5.32] - 2026-10-07
 
 ### Fixed

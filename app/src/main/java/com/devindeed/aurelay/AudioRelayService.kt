@@ -360,11 +360,8 @@ class AudioRelayService : Service() {
                 "停止接收",
                 stopPendingIntent
             )
-            .setStyle(
-                androidx.media.app.NotificationCompat.MediaStyle()
-                    .setMediaSession(mediaSession.sessionToken)
-                    .setShowActionsInCompactView(0)
-            )
+            // 与常驻通知同理：不挂 MediaStyle，否则会被折叠成媒体样式、
+            // 既破坏两行文案又可能失去 ongoing 的不可划走语义
             .build()
     }
 
@@ -582,32 +579,22 @@ class AudioRelayService : Service() {
                 // 标题只说状态，不塞动作
                 .setContentTitle("Aurelay 声音中继")
                 .setContentText(displayText)
-                // 图标统一用 Aurelay 自己的启动图标；其余按保活最高策略，与采集端一致：
-                // 最高优先级 + 常驻不可滑走 + 显示持续运行时间 + 点击打开应用
                 .setSmallIcon(com.devindeed.aurelay.R.mipmap.ic_launcher)
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                // ⚠️ 常驻三件套：ongoing + 不显示时间 + 不重复提醒。
+                // 之前这里既setShowWhen(true) 又 setUsesChronometer(true)，
+                // 通知右侧的时间列会把「标题/正文」两行式挤歪，视觉上像没改成功；
+                // 运行时长已由 App 界面的「已连续运行 X」承担，通知里不必重复。
                 .setOngoing(true)
-                .setShowWhen(true)
-                .setShowWhen(true)
-                .setUsesChronometer(true)
-                .setWhen(serviceStartAt)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
                 .setContentIntent(openAppPendingIntent)
-                .addAction(
-                    android.R.drawable.ic_menu_close_clear_cancel,
-                    "断开连接",
-                    disconnectPendingIntent
-                )
-                .addAction(
-                    android.R.drawable.ic_menu_preferences,
-                    "打开应用",
-                    openAppPendingIntent
-                )
-                .setStyle(
-                    androidx.media.app.NotificationCompat.MediaStyle()
-                        .setMediaSession(mediaSession.sessionToken)
-                        .setShowActionsInCompactView(0, 1)
-                )
+                // ⚠️ 不要挂 MediaStyle，也不要加 action 按钮。
+                // MediaStyle 会把通知折叠成媒体播放器样式，在部分国产 ROM 上
+                // 既不遵守 ongoing（能被划走）、又会把两行文案压成一行小字——
+                // 用户实测「文案没改成功 + 仍可划走」正是这两条叠加的结果。
+                // 停止操作统一在 App 内完成，通知只承担「常驻 + 点击回到 App」。
         return builder.build()
     }
 
@@ -783,7 +770,10 @@ class AudioRelayService : Service() {
             val input = PushbackInputStream(rawInput, HEADER_SIZE)
             // 每次会话开始前清掉上一轮的判定结果
             headerIncomplete = false
-            val header = readHeader(input)
+            // 中转链路的数据来自服务器转发，不能按官方裸 PCM 处理：
+            // PC 端与手机的协议只有AURL 一种，无包头即说明这是旧会话的残留帧。
+            val isRelayPeer = peerLabel == "中转服务器"
+            val header = readHeader(input, isRelayPeer)
             // readHeader 返回 null 有两种含义，必须区分：
             //   · 包头没读够就超时（headerIncomplete）→ 本次连接直接结束；
             //   · 读满 8 字节但魔数不对 → 是真的官方裸 PCM，继续按PCM 处理。
@@ -947,8 +937,9 @@ class AudioRelayService : Service() {
     // 混为一谈会让 48kHz 的 Opus 被按 44.1kHz 裸 PCM 播放（听感即严重失真）。
     //
     // @param input: 带 8 字节回退缓冲的输入流
+    // @param isRelayPeer: true 表示数据来自服务器中转（PC 端经中转发来）
     // @return: AURL 包头字节数组；放弃会话时返回 null
-    private fun readHeader(input: PushbackInputStream): ByteArray? {
+    private fun readHeader(input: PushbackInputStream, isRelayPeer: Boolean = false): ByteArray? {
         val header = ByteArray(HEADER_SIZE)
         var filled = 0
         var idleMillis = 0L
@@ -981,6 +972,21 @@ class AudioRelayService : Service() {
             return header
         }
         // 包头已读满 8 字节，却没有匹配自研魔数 → 确实是别的协议，退回裸 PCM。
+        //
+        // ⚠️ 但有一种例外必须拦下来：**经中转时读到了旧会话残留的音频帧**
+        // （实测 10:44:42 读到 `00 00 00 d8 fc 61 3c 7a`，开头就没有 AURL 包头）。
+        // 那是PC 端还没重连就发过来的旧流，正确的流不该长这样。
+        // 此时按裸 PCM 播放必然失真（把 48kHz 的 Opus 当 44.1kHz 裸 PCM），
+        // 所以这种情况直接放弃本次会话、让链路重连，而不是硬播。
+        if (isRelayPeer) {
+            DiagLog.e(
+                "协议",
+                "中转链路读到无包头的音频数据（${header.joinToString(" ") { "%02x".format(it) }}），" +
+                    "判定为旧会话残留，放弃本次连接等待重连"
+            )
+            return null
+        }
+
         DiagLog.w(
             "协议",
             "未检测到 AURL 包头（读到 ${header.joinToString(" ") { "%02x".format(it) }}），按官方裸 PCM 处理"
