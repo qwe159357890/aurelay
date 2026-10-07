@@ -58,6 +58,11 @@ object AppPrefs {
     // 默认中转服务器地址（复用中心服务器的 15151 端口，不再另开端口）
     const val DEFAULT_RELAY_SERVER = "039039.xyz:15151"
 
+    // 中转服务器域名 DNS 解析失败时的兜底 IP（服务器实际公网 IPv4）。
+    // 实测蜂窝网络下切网后第一次连接偶发「Unable to resolve host 039039.xyz」，
+    // 但重连又成功，说明是运营商 DNS 抖动而非域名失效。兜底 IP 保证链路稳定建立。
+    const val RELAY_FALLBACK_IP = "122.6.190.161"
+
     // 中转的 WebSocket 路径（与 center-server 的 aurelay.relay_path 一致）
     const val RELAY_PATH = "/api/aurelay/relay"
 
