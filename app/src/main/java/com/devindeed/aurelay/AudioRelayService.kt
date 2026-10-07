@@ -162,41 +162,23 @@ class AudioRelayService : Service() {
         notificationManager = NotificationManagerCompat.from(this)
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
-        // UDP 广播发现已整体删除：电脑端改从中心服务器查询本机地址
-        // 启动地址上报（把本机地址同步到用户自己的中心服务器，供电脑端发现）
-        AddressReporter.start(this)
-        // 全程保活：持有 20 项受控资源（锁、兜底调度、网络回调、位置/传感器/蓝牙/相机等）
-        applyKeepAlive()
+        // 保活资源（ResourceHolder / 一像素锚点 / 无声播放）与地址上报已整体移交
+        // KeepAliveService 无条件持有——本服务退化为纯接收，只保留网络切换监听。
+        setupNetworkWatcher()
         Log.i("AudioRelay", "Service onCreate called, foreground started.")
         DiagLog.i("服务", "接收服务已启动：监听端口 $AUDIO_PORT，TLS=$useTls")
         DiagLog.i("环境", DiagLog.environment(this))
     }
 
     /**
-     * 按「全程保活」开关持有或释放受控资源，并同步两个独立锚点开关
+     * 注册网络切换监听：WiFi 走局域网直连，蜂窝走服务器中转
+     *
+     * 保活资源（ResourceHolder / 一像素锚点 / 无声播放）与地址上报已移交
+     * KeepAliveService 统一持有，本服务只保留「接收音频」必需的链路切换逻辑。
      *
      * :return: 无返回值
      */
-    private fun applyKeepAlive() {
-        val keepAlive = AppPrefs.getBoolean(this, AppPrefs.KEY_KEEP_ALIVE_ALWAYS, true)
-        if (keepAlive) {
-            ResourceHolder.acquireAll(this)
-        } else {
-            ResourceHolder.releaseAll(this)
-        }
-        // 一像素锚点（独立开关，默认关闭）。
-        //⚠️ 默认开启会让系统每次都弹出「"Aurelay声音中继"正在其他应用的上层运行 /
-        //   显示内容…」这类提示，并引导用户去设置里关掉该功能 —— 用户实测非常困扰。
-        //   原因是一像素锚点用 TYPE_APPLICATION_OVERLAY 悬浮窗实现，属于「在其他应用上层显示」。
-        //   悬浮窗是可选保活手段，其余锚点（WakeLock / AlarmManager / JobScheduler 等）
-        //   不触发这类系统提示，故默认关闭，需要时在设置里手动开启。
-        if (AppPrefs.getBoolean(this, AppPrefs.KEY_KEEP_ALIVE_ONE_PIXEL, false)) {
-            OnePixelOverlay.show(this)
-        } else {
-            OnePixelOverlay.hide(this)
-        }
-        // 无声播放锚点（独立开关）
-        SilentPlayer.applyEnabled(this)
+    private fun setupNetworkWatcher() {
         // 网络切换时自动切换链路：WiFi 走局域网直连，蜂窝走服务器中转
         NetworkWatcher.addListener { type ->
             DiagLog.i("服务", "检测到网络切换：$type，重新选择链路")
@@ -1475,8 +1457,6 @@ class AudioRelayService : Service() {
         super.onDestroy()
         Log.i("AudioRelay", "onDestroy called, shutting down service.")
         isServerRunning = false
-        // 停止地址上报（线程与网络回调）
-        try { AddressReporter.stop(this) } catch (e: Exception) { /* 忽略 */ }
         try {
             serverSocket?.close()
         } catch (e: IOException) {
@@ -1497,14 +1477,6 @@ class AudioRelayService : Service() {
         currentOutChannels = 0
         // 停止中转链路
         stopRelayLink()
-        // 释放全程保活资源与两个独立锚点
-        try {
-            ResourceHolder.releaseAll(this)
-            OnePixelOverlay.hide(this)
-            SilentPlayer.release()
-        } catch (e: Exception) {
-            DiagLog.w("服务", "释放保活资源失败：${e.message}")
-        }
         // Ensure UI knows we're disconnected when service stops
         try {
             val bcast = Intent("com.devindeed.aurelay.CLIENT_CONNECTION")
