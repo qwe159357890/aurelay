@@ -126,12 +126,10 @@ class RelayClient {
         this.role = role
         running = true
 
-        if (pipeIn == null) {
-            val out = PipedOutputStream()
-            val ins = PipedInputStream(out, 256 * 1024)
-            pipeOut = out
-            pipeIn = ins
-        }
+        // 每次 start 都无条件重建管道：保证上层拿到的是全新、干净、可读的流。
+        // 若沿用上次的管道，它可能已被上层读到 EOF（PipedInputStream 一旦
+        // read 返回 -1 就永久 dead），后续写入的数据无人能读。
+        rebuildPipe()
 
         httpClient = OkHttpClient.Builder()
             .connectTimeout(8, TimeUnit.SECONDS)
@@ -153,13 +151,7 @@ class RelayClient {
         if (!running) return
         running = false
         closeWebSocket()
-        try {
-            pipeOut?.close()
-        } catch (e: Exception) {
-            // 忽略关闭异常
-        }
-        pipeOut = null
-        pipeIn = null
+        closePipe()
         httpClient = null
         DiagLog.i("中转", "中转客户端已停止")
         notifyState(State.IDLE, "已停止")
@@ -173,7 +165,50 @@ class RelayClient {
      *
      * :return: 音频输入流；未启动时返回 null
      */
-    fun audioInput(): InputStream? = pipeIn
+    fun audioInput(): InputStream? = synchronized(this) { pipeIn }
+
+    /**
+     * 重建音频管道（新连接建立时调用，保证上层每次拿到干净的新流）
+     *
+     * PipedInputStream 一旦 read 返回 -1（读到 EOF）就永久 dead，
+     * 之后即使 PipedOutputStream 继续写入也无法被读出。因此每次 WebSocket
+     * 重连成功都必须重建一对全新管道，否则上层「读到旧流 EOF 退出后」，
+     * 新数据无人能读，表现为「中转已连上却完全没声音」。
+     *
+     * :return: 无返回值
+     */
+    @Synchronized
+    private fun rebuildPipe() {
+        try {
+            pipeOut?.close()
+        } catch (e: Exception) {
+            // 忽略关闭异常
+        }
+        val out = PipedOutputStream()
+        val ins = PipedInputStream(out, 256 * 1024)
+        pipeOut = out
+        pipeIn = ins
+    }
+
+    /**
+     * 关闭并置空音频管道（断线或停止时调用）
+     *
+     * 关闭 pipeOut 会让正在读 pipeIn 的上层立即收到 EOF（read 返回 -1），
+     * 从而退出本次消费；置空则让上层通过 audioInput() 感知「当前无可用流」，
+     * 进入等待，待 onOpen 重建管道后再继续。
+     *
+     * :return: 无返回值
+     */
+    @Synchronized
+    private fun closePipe() {
+        try {
+            pipeOut?.close()
+        } catch (e: Exception) {
+            // 忽略关闭异常
+        }
+        pipeOut = null
+        pipeIn = null
+    }
 
     /**
      * 取最近一次收到数据的时间戳（供界面显示心跳新鲜度）
@@ -226,6 +261,9 @@ class RelayClient {
             override fun onOpen(socket: WebSocket, response: Response) {
                 webSocket = socket
                 lastAliveAt = System.currentTimeMillis()
+                // 每次新连接都重建管道：旧管道可能已被上层读到 EOF（dead），
+                // 不重建的话，重连后写入的数据无人能读（表现为「已连上却没声音」）。
+                rebuildPipe()
                 DiagLog.i("中转", "已连上中转服务器")
                 val hello = JSONObject()
                 hello.put("type", "hello")
@@ -246,20 +284,22 @@ class RelayClient {
                 // 仍会回调到这里。此前无脑往 pipeOut 写，会刷出成百上千行
                 // 「写入音频管道失败 | Read end dead」（实测 09:16-09:17 共 838 行）。
                 if (!running) return
-                val out = pipeOut ?: return
+                val data = bytes.toByteArray()
                 try {
-                    val data = bytes.toByteArray()
-                    // PipedOutputStream.write(byte[], int, int) 返回 void：
-                    // 它在内部要么写完请求的字节、要么抛 IOException，
-                    // **不存在部分写入**（与 OutputStream 的契约不同，
-                    // 但 PipedOutputStream 满足这一条），所以一次写完即可。
-                    out.write(data, 0, data.size)
-                    out.flush()
-                    listener?.onAudioData(data.size)
+                    val out = synchronized(this@RelayClient) { pipeOut }
+                    if (out != null) {
+                        // PipedOutputStream.write(byte[], int, int) 返回 void：
+                        // 它在内部要么写完请求的字节、要么抛 IOException，
+                        // **不存在部分写入**（与 OutputStream 的契约不同，
+                        // 但 PipedOutputStream 满足这一条），所以一次写完即可。
+                        out.write(data, 0, data.size)
+                        out.flush()
+                        listener?.onAudioData(data.size)
+                    }
                 } catch (e: IOException) {
-                    // 管道已断（对端停止接收）：属于正常收尾，不必逐帧刷错误日志
+                    // 管道已断（断线重连重建管道、或对端停止接收）：属正常收尾，
+                    // 不必逐帧刷错误日志，也不应把整个中转客户端判死。
                     DiagLog.w("中转", "音频管道已断开，忽略残余数据帧")
-                    running = false
                 } catch (e: Exception) {
                     DiagLog.e("中转", "写入音频管道失败", e)
                 }
@@ -269,12 +309,16 @@ class RelayClient {
                 DiagLog.e("中转", "中转连接异常：${t.message}", t)
                 notifyState(State.ERROR, "连接异常：${t.message ?: "未知"}")
                 webSocket = null
+                // 断线即关闭管道：让上层读管道立即 EOF 从而退出本次消费，
+                // 等重连成功（onOpen）重建新管道后，上层会重新消费。
+                closePipe()
                 scheduleReconnect()
             }
 
             override fun onClosed(socket: WebSocket, code: Int, reason: String) {
                 DiagLog.i("中转", "中转连接已关闭：code=$code reason=$reason")
                 webSocket = null
+                closePipe()
                 scheduleReconnect()
             }
         })
