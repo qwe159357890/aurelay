@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.41] - 2026-10-07
+
+### Fixed
+- **切蜂窝后手机「网络类型」检测失效、中转 R 从不启动的根治（本次 19:18 事故）**：
+  OnePlus LE2120 / Android 14 上 WiFi→蜂窝切换时，`onLost(WiFi)` 触发瞬间蜂窝网络
+  尚未就绪，`detect()` 拿到的 `activeNetwork` 仍是旧 WiFi，返回 WIFI——与缓存的
+  WIFI 相同，被去重逻辑直接 return；等蜂窝真正就绪后又未必再触发一次 `onAvailable`，
+  于是 CELLULAR 永远检测不到，链路永远停在「局域网直连」，中转 R 从不启动。后果是
+  服务器房间里只有 PC 的 S，PC 等 ready 8 秒超时断开、无限重连（服务器日志 19:18:34
+  ~19:20:20 每 8 秒一次「发送方已接入→已下线」）。三处修复：
+  1. `NetworkWatcher.onSystemNetworkChanged` 改「延迟重探测」：回调后延迟 800ms 等
+     网络尘埃落定再 `detect()`，拿到真实的最终类型，不再被过渡态欺骗；
+  2. `ResourceHolder.registerNetworkCallback` 补 `onCapabilitiesChanged` 回调（与
+     AddressReporter 对齐），网络能力变化（WiFi→蜂窝）也能触发链路决策；
+  3. `AudioRelayService` 新增「周期链路自检」兜底线程：每 10 秒主动 `detect()` 一次
+     真实网络类型，与已保存链路模式比对，不一致自动纠正（即使网络回调完全失灵也能在
+     10 秒内切到中转）。
+
 ## [v1.5.40] - 2026-10-07
 
 ### Fixed
