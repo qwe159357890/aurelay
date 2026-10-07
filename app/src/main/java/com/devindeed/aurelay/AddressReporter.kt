@@ -45,6 +45,10 @@ object AddressReporter {
     // 最近一次成功/尝试上报的时间戳（界面据此显示「N 秒前」并实时走动）
     const val KEY_LAST_TIME = "report_last_time"
 
+    // 上报的链路模式：direct = 电脑可直连手机；relay = 只能走服务器中转
+    const val MODE_DIRECT = "direct"
+    const val MODE_RELAY = "relay"
+
     // 周期上报间隔：60 秒
     private const val REPORT_INTERVAL_MS = 60_000L
 
@@ -127,18 +131,20 @@ object AddressReporter {
         if (!isEnabled(context)) {
             return
         }
-        // 蜂窝网络不上报地址：此时手机没有公网入站能力，走服务器中转，
-        // 由中转服务器完成配对，上报地址没有意义（且会污染 PC 端的候选列表）
-        if (NetworkWatcher.detect(context) != NetworkWatcher.NetType.WIFI) {
-            saveResult(prefs, "跳过（蜂窝网络走中转，不上报）")
-            DiagLog.i("上报", "当前为蜂窝网络，跳过地址上报（走服务器中转）")
-            return
-        }
         val url = prefs.getString(KEY_URL, "")?.trim() ?: ""
         val token = prefs.getString(KEY_TOKEN, "")?.trim() ?: ""
 
-        // 采集本机 IPv4 / IPv6 地址
-        val addresses = collectAddresses()
+        // 决定上报模式：
+        //   direct（直连）= WiFi 等有可入站地址的网络，上报本机地址供电脑直连；
+        //   relay （中转）= 蜂窝网络，手机没有公网入站能力，电脑连不上来，
+        //                   此时**仍然要上报**（只是不带地址），让电脑端知道
+        //                   「这台设备现在只能走服务器中转」并自动切换。
+        // 旧行为是蜂窝直接跳过上报，导致电脑端根本查不到这台设备。
+        val isWifi = NetworkWatcher.detect(context) == NetworkWatcher.NetType.WIFI
+        val mode = if (isWifi) MODE_DIRECT else MODE_RELAY
+
+        // 采集本机 IPv4 / IPv6 地址（蜂窝下不采集，避免把无效地址塞进候选列表）
+        val addresses = if (isWifi) collectAddresses() else Pair(listOf(), listOf())
         val ipv4List = addresses.first
         val ipv6List = addresses.second
 
@@ -151,6 +157,7 @@ object AddressReporter {
             append("\"device_id\":\"").append(escapeJson(deviceId)).append("\",")
             append("\"device_name\":\"").append(escapeJson(deviceName)).append("\",")
             append("\"port\":").append(AudioRelayService.AUDIO_PORT).append(",")
+            append("\"mode\":\"").append(mode).append("\",")
             append("\"ipv4\":").append(toJsonArray(ipv4List)).append(",")
             append("\"ipv6\":").append(toJsonArray(ipv6List))
             append("}")
@@ -184,10 +191,17 @@ object AddressReporter {
             val bizCode = extractJsonInt(bodyText, "code")
             val accepted = httpCode in 200..299 && (bizCode == null || bizCode == 0)
             if (accepted) {
-                saveResult(prefs, "成功")
+                val modeText = if (mode == MODE_RELAY) "中转模式" else "直连模式"
+                saveResult(prefs, "成功（$modeText）")
+                DiagLog.i(
+                    "上报",
+                    "上报成功：$modeText" +
+                        if (mode == MODE_RELAY) "（蜂窝网络，电脑需经服务器中转）"
+                        else " IPv4=${ipv4List.size} IPv6=${ipv6List.size}"
+                )
                 Log.i(
                     TAG,
-                    "上报成功 (HTTP $httpCode) IPv4=${ipv4List.size} IPv6=${ipv6List.size} 地址=$ipv4List $ipv6List"
+                    "上报成功 (HTTP $httpCode) mode=$mode IPv4=${ipv4List.size} IPv6=${ipv6List.size} 地址=$ipv4List $ipv6List"
                 )
             } else {
                 val reason = extractJsonString(bodyText, "message") ?: "HTTP $httpCode"

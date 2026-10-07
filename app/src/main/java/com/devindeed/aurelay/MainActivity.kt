@@ -744,22 +744,22 @@ fun AurelayApp(
                                 isBroadcastMode = false // Prevent switch
                             } else {
                                 isBroadcastMode = true
-                                // Stop Receiver Service if running when switching modes?
-                                // Assuming we stop previous mode service to avoid conflicts or confusion
-                                if (isServiceRunning) {
-                                    val intent = Intent(context, AudioRelayService::class.java)
-                                    context.stopService(intent)
-                                    isServiceRunning = false
-                                }
+                                // ⚠️ 常驻通知（设计文档 8.3 第 4 项）：这里**绝不能**停接收服务。
+                                // AudioRelayService 是保活前台服务，它挂的那条通知就是用户要的
+                                // 常驻通知；以前一切到电脑放音就 stopService 把它干掉，
+                                // 通知栏立刻空掉——这正是「打开 App 却找不到常驻通知」的直接原因。
+                                // 电脑放音启的是 AudioCaptureService，两者各自独立、互不冲突。
+                                // 此方向下 isServiceRunning 改指「采集服务是否在跑」，
+                                // 刚切过来还没点连接，所以置 false。
+                                isServiceRunning = false
                             }
                         } else { // Switching back to Receiver Mode
                             isBroadcastMode = false
-                             // Stop Sender Service if running
-                            if (isServiceRunning) {
-                                val intent = Intent(context, AudioCaptureService::class.java)
-                                context.stopService(intent)
-                                isServiceRunning = false
-                            }
+                            // 只停电脑放音的采集服务（如果它在跑）
+                            val captureIntent = Intent(context, AudioCaptureService::class.java)
+                            context.stopService(captureIntent)
+                            // 接收服务是常驻的，切回来它还在——常驻通知也还在
+                            isServiceRunning = true
                         }
                     },
                     modifier = Modifier.padding(horizontal = 8.dp)
@@ -800,11 +800,13 @@ fun AurelayApp(
                                      else if (isMuted) Icons.Rounded.HeadsetOff 
                                      else Icons.Rounded.Headphones,
                         contentDescription = if (isMuted) "取消静音" else "静音",
-                        modifier = Modifier.size(56.dp),
+                        // 顶部图标与两处留白各收一档，把省下的高度让给中间区——
+                        // 中间区放的是「可视化条 + 音量环 + 音量滑块」，比留白更需要空间。
+                        modifier = Modifier.size(48.dp),
                         tint = statusColor
                     )
                 }
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 // 电脑放音：点列表里的「连接」成功后就**自动**把麦克风声音推给电脑，
                 // 因此文案不应再提「点开始推送」那套旧流程。
@@ -817,7 +819,7 @@ fun AurelayApp(
                          if (isMuted) "已静音" else "正在接收播放"
                     } else if (isServiceRunning) "等待连接" else "服务未启动"
                 }
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
                     text = statusText,
@@ -913,13 +915,15 @@ fun AurelayApp(
                         // 电脑放音正在推送时：显示音量环（仿 MicYou），
                         // 让「麦克风到底有没有收进声音」一眼可见
                         if (isBroadcastMode && isServiceRunning) {
+                            // 与手机放音那屏一致：音量环由 120dp 减到 100dp，
+                            // 让下面的连接信息卡与操作项在同一屏里完整显示，不被挤出可视区。
                             VolumeRingVisualizer(
-                                modifier = Modifier.size(120.dp),
+                                modifier = Modifier.size(100.dp),
                                 // captureLevel 是 Activity 字段，这里必须经 activity 实例取
                                 audioLevel = activity?.captureLevel ?: 0f,
                                 color = MaterialTheme.colorScheme.primary
                             )
-                            Spacer(Modifier.height(12.dp))
+                            Spacer(Modifier.height(10.dp))
                         }
 
                         Card(

@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.29] - 2026-10-07
+
+### Fixed
+- **常驻通知这次真正常驻了**：上一版改了「打开 App 即拉起服务」，但**切到「电脑放音」时
+  `MainActivity` 会 `stopService(AudioRelayService)`**，把保活服务和它挂的常驻通知一起干掉，
+  所以用户仍然只在「手机放音 → 点开始」之后才看到通知。现已改为：切模式**只**停电脑放音
+  自己的 `AudioCaptureService`，接收服务全程保留。
+- **中转链路一次都没连上过**：`RelayClient` 的 `url` 字段**声明后从未赋值**，
+  而 `connectOnce()` 直接拿它建 WebSocket，于是蜂窝下每次都抛
+  `IllegalArgumentException: Expected URL scheme 'http' or 'https' but no scheme was found for ""`。
+  已在 `start()` 里按 `host/port` 拼出 `ws://...`。
+- **蜂窝网络下 PC 端查不到手机**（`AddressReporter`）：本地早已改成「蜂窝也上报、只是不带地址、
+  并带上 `mode=relay`」，但这份改动**从未推送到仓库**，云端编译用的仍是旧的
+  「跳过地址上报」版本。本次随包推送，PC 端据此可知该走中转。
+- **PC 端切换「链接方式」保存失败**：`main.py` 调了 `get_viewer_settings` 却**从未 import**，
+  每次切换都抛 `NameError`，被外层 except 记成一条警告，实际根本没落盘。改用已有的
+  `set_param`（settings_store 通道）。
+- **音量环尺寸两处统一收小**：手机放音与电脑放音的音量环都由 120dp 减到 100dp；
+  手机放音的可视化条 140→100dp；顶部图标 56→48dp、两处留白收窄，把高度让给中间区，
+  使「可视化条 + 音量环 + 音量滑块」能在一屏内完整显示（中间区另加滚动兜底）。
+
+### Changed
+- **三通知方案**（用户定稿）：① 常驻通知（App 运行全程在、`setOngoing(true)` 不可滑走）；
+  ② 手机放音有客户端连入时才出现的会话通知（新 ID 1003，会话结束即撤销）；
+  ③ 电脑放音的 `AudioCaptureService` 通知（ID 1002）。三条互不干扰。
+- **PC 端优先内网 IPv4**：手机与电脑多半在同一局域网，内网直连无 NAT/运营商策略障碍，
+  实测比公网 IPv6 更容易连上。候选排序把「内网 IPv4」提到公网地址之前
+  （仍低于「探测可达」与「上次连通」），界面提示行也改为优先显示内网 IPv4，
+  不再固定显示 `public_ipv6`，避免「显示的地址和实际连的对不上」。
+
 ## [v1.5.28] - 2026-10-06
 
 ### Fixed

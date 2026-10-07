@@ -78,6 +78,11 @@ class AudioRelayService : Service() {
         // 否则会再贴出第二条通知，因此提为常量。
         const val NOTIFICATION_ID = 1001
 
+        // 「手机放音」会话通知的 ID：只在真有电脑连进来播放时才出现，
+        // 会话结束即撤销；与常驻通知（1001）、电脑放音通知（AudioCaptureService
+        // 的 1002）并列，共三条，互不影响。
+        const val SESSION_NOTIFICATION_ID = 1003
+
         // 音频接收端口（地址上报时会一并告知 PC 发送端）
         const val AUDIO_PORT = 5000
 
@@ -265,6 +270,84 @@ class AudioRelayService : Service() {
         }
         // 常驻通知的文案同步回「等待接收音频」
         refreshNotification()
+        // 会话通知随之撤销（常驻通知仍在，这是两者的关键区别）
+        updateSessionNotification(false)
+    }
+
+    /**
+     * 张贴或撤销「手机放音」会话通知
+     *
+     * 与常驻通知（NOTIFICATION_ID）分开：常驻那条 App 运行期间一直在，
+     * 本条只在真的有电脑连进来播放时出现，会话结束即撤销。
+     *
+     * :param connected: True 张贴会话通知，False 撤销
+     * :return: 无返回值
+     */
+    private fun updateSessionNotification(connected: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                this, Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.w("AudioRelay", "Missing POST_NOTIFICATIONS permission; skipping session notification")
+            return
+        }
+        @SuppressLint("MissingPermission")
+        if (connected) {
+            notificationManager.notify(SESSION_NOTIFICATION_ID, buildSessionNotification())
+        } else {
+            notificationManager.cancel(SESSION_NOTIFICATION_ID)
+        }
+    }
+
+    /**
+     * 构造「手机放音」会话通知（正在接收电脑声音）
+     *
+     * :return: 通知对象
+     */
+    private fun buildSessionNotification(): Notification {
+        val openAppIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val openAppPendingIntent = PendingIntent.getActivity(
+            this, 0, openAppIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        // 停止按钮走 ACTION_STOP_SERVICE：现在它只停会话、不销毁服务，
+        // 因此点了之后本条通知消失，常驻通知仍留在通知栏。
+        val stopIntent = Intent(this, AudioRelayService::class.java).apply {
+            action = ACTION_STOP_SERVICE
+        }
+        val stopPendingIntent = PendingIntent.getService(
+            this, 2, stopIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val peer = if (lastClientName.isNotEmpty()) lastClientName
+        else lastClientIp.ifEmpty { "电脑" }
+
+        return NotificationCompat.Builder(this, "audioRelayChannel")
+            .setContentTitle("正在接收电脑声音")
+            .setContentText("来自 $peer")
+            .setSmallIcon(com.devindeed.aurelay.R.mipmap.ic_launcher)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setOngoing(true)
+            .setShowWhen(true)
+            .setWhen(System.currentTimeMillis())
+            .setContentIntent(openAppPendingIntent)
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "停止接收",
+                stopPendingIntent
+            )
+            .setStyle(
+                androidx.media.app.NotificationCompat.MediaStyle()
+                    .setMediaSession(mediaSession.sessionToken)
+                    .setShowActionsInCompactView(0)
+            )
+            .build()
     }
 
     /**
@@ -578,6 +661,8 @@ class AudioRelayService : Service() {
         }
 
         lastClientIp = peer
+        // 真有电脑连进来才张贴会话通知（与常驻通知并列，共两条）
+        updateSessionNotification(true)
         try {
             handleStream(client.getInputStream(), peer)
         } finally {
@@ -586,6 +671,8 @@ class AudioRelayService : Service() {
             if (currentClientSocket === client) {
                 currentClientSocket = null
             }
+            // 会话结束：撤销会话通知（常驻通知不受影响）
+            updateSessionNotification(false)
         }
     }
 

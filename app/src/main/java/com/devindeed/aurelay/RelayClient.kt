@@ -116,6 +116,11 @@ class RelayClient {
         val separator = cleaned.lastIndexOf(':')
         host = if (separator > 0) cleaned.substring(0, separator) else cleaned
         port = if (separator > 0) cleaned.substring(separator + 1).toIntOrNull() ?: 15151 else 15151
+        // ⚠️ url 字段此前**从未被赋值**，而 connectOnce() 直接拿它建 WebSocket，
+        // 于是蜂窝下每次连接都抛
+        // 「IllegalArgumentException: Expected URL scheme 'http' or 'https' but no scheme was found for ""」
+        // ——中转链路其实一次都没连上过。必须在这里拼出来。
+        url = "ws://$host:$port${AppPrefs.RELAY_PATH}"
         deviceId = AddressReporter.getOrCreateDeviceId(app)
         token = AppPrefs.getString(app, AppPrefs.KEY_REPORT_TOKEN, AppPrefs.DEFAULT_REPORT_TOKEN)
         this.role = role
