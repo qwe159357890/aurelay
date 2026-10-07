@@ -148,10 +148,13 @@ class RelayClient {
         this.role = role
         running = true
 
-        // 每次 start 都无条件重建管道：保证上层拿到的是全新、干净、可读的流。
-        // 若沿用上次的管道，它可能已被上层读到 EOF（PipedInputStream 一旦
-        // read 返回 -1 就永久 dead），后续写入的数据无人能读。
-        rebuildPipe()
+        // 不在这里 rebuildPipe：管道统一由 onOpen 回调负责重建。
+        // 若在此处先建一条管道，紧接着 connectOnce() 的 onOpen 又 rebuildPipe 会把
+        // 这条管道关掉，而 startRelayLink 的消费线程此刻可能正阻塞在这条管道上读，
+        // 于是读到 EOF、误判「流包头未收全」而放弃（实测 17:49:34 切蜂窝后
+        // 「已连上中转服务器」与「流包头未收全」落在同一毫秒）。
+        // 首次连接时在 onOpen 之前 audioInput() 返回 null，消费线程会 sleep 等待，
+        // onOpen 建好管道后自然开始消费，干净无竞态。
 
         httpClient = OkHttpClient.Builder()
             .dns(relayDns)
