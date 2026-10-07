@@ -23,14 +23,20 @@ class KeepAliveJobService : JobService() {
     override fun onStartJob(params: JobParameters?): Boolean {
         DiagLog.install(this)
         DiagLog.i("保活", "JobScheduler 兜底任务触发")
-        // 与 KeepAliveReceiver 同理：必须一并检查「自动启动」开关，
-        // 否则用户在设置里关掉它，这条兜底仍会把服务拉起来。
-        // 语义（用户 2026-10-07 确认）：自动启动 = 允许服务自启。
-        if (!AppPrefs.getBoolean(this, AppPrefs.KEY_AUTO_START, false)) {
-            DiagLog.i("保活", "自动启动开关已关闭，不拉起服务")
-            return false
+        // 常驻保活服务无条件拉起：只负责通知 + 保活 + 地址上报，与开关无关。
+        try {
+            val keepAlive = Intent(this, KeepAliveService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(keepAlive)
+            } else {
+                startService(keepAlive)
+            }
+            DiagLog.i("保活", "已尝试拉起常驻保活服务")
+        } catch (e: Exception) {
+            DiagLog.e("保活", "JobScheduler 拉起保活服务失败", e)
         }
-        if (AppPrefs.getBoolean(this, AppPrefs.KEY_KEEP_ALIVE_ALWAYS, true)) {
+        // 接收服务是否自启由「自动启动服务」开关决定（第二层，独立）。
+        if (AppPrefs.getBoolean(this, AppPrefs.KEY_AUTO_START, false)) {
             try {
                 val service = Intent(this, AudioRelayService::class.java)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -38,9 +44,12 @@ class KeepAliveJobService : JobService() {
                 } else {
                     startService(service)
                 }
+                DiagLog.i("保活", "已尝试拉起接收服务")
             } catch (e: Exception) {
-                DiagLog.e("保活", "JobScheduler 拉起服务失败", e)
+                DiagLog.e("保活", "JobScheduler 拉起接收服务失败", e)
             }
+        } else {
+            DiagLog.i("保活", "自动启动开关已关闭，不拉起接收服务")
         }
         return false
     }
