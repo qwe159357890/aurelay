@@ -30,18 +30,22 @@ class KeepAliveReceiver : BroadcastReceiver() {
         val app = context.applicationContext
         DiagLog.install(app)
         DiagLog.i("保活", "收到保活兜底唤醒")
-        if (!AppPrefs.getBoolean(app, AppPrefs.KEY_KEEP_ALIVE_ALWAYS, true)) {
-            DiagLog.i("保活", "全程保活开关已关闭，不拉起服务")
-            return
+        // 常驻保活服务无条件拉起：它只负责通知 + 保活 + 地址上报，
+        // 与「自动启动服务」开关无关，进程被杀后也必须复活常驻通知。
+        try {
+            val keepAlive = Intent(app, KeepAliveService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                app.startForegroundService(keepAlive)
+            } else {
+                app.startService(keepAlive)
+            }
+            DiagLog.i("保活", "已尝试拉起常驻保活服务")
+        } catch (e: Exception) {
+            DiagLog.e("保活", "拉起常驻保活服务失败", e)
         }
-        // ⚠️ 必须一并检查「自动启动」开关。
-        // 此前只看保活总开关，于是用户在设置里关掉「自动启动」后，
-        // 这个兜底广播仍会每 15 分钟把服务拉起来 —— 表现为
-        // 「明明关了自动启动，打开 App 还是自动启动手机放音服务」。
-        // 语义（用户 2026-10-07 确认）：自动启动 = 允许服务自启。
-        // 关掉后：App 运行期间的通知与保活不受影响，只是进程真被杀后不再自动复活。
+        // 接收服务是否自启由「自动启动服务」开关决定（第二层，独立）。
         if (!AppPrefs.getBoolean(app, AppPrefs.KEY_AUTO_START, false)) {
-            DiagLog.i("保活", "自动启动开关已关闭，不拉起服务（App 运行期间的通知与保活不受影响）")
+            DiagLog.i("保活", "自动启动开关已关闭，不拉起接收服务（常驻通知与保活不受影响）")
             return
         }
         try {
