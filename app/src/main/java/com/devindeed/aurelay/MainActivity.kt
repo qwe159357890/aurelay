@@ -1390,8 +1390,10 @@ fun AurelayApp(
                 enabled = !isBroadcastMode || isServiceRunning || clientIp.isNotEmpty(),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(64.dp)
-                    .padding(bottom = 8.dp),
+                    // 64dp 会把上方音量滑块的可用空间挤掉一截（滑块被按钮边缘压住），
+                    // 压到 48dp 把高度让给中间内容区
+                    .height(48.dp)
+                    .padding(bottom = 4.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (isServiceRunning)
                         MaterialTheme.colorScheme.error.copy(alpha = 0.9f)

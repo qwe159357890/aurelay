@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.30] - 2026-10-07
+
+### Fixed
+- **「停止」终于能停下了**：上一版的「停止」只结束当前音频会话，但接收监听还开着，
+  电脑端自动重连在几十毫秒内就重新建链（实测日志 09:05:40：点停止 → 35ms 后电脑重连 →
+  新会话继续放音，循环往复）。现在停止会**一并关闭监听端口与中转出站长连接**，
+  再点「开始」时重新拉起。服务与常驻通知照旧保留（保活不受影响）。
+- **音量滑块被停止按钮压住**：底部控制按钮 64dp → 48dp，把高度让给中间内容区。
+
 ## [v1.5.29] - 2026-10-07
 
 ### Fixed

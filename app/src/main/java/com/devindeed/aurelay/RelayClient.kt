@@ -165,6 +165,9 @@ class RelayClient {
         notifyState(State.IDLE, "已停止")
     }
 
+    // 中转客户端是否处于运行态（供服务层判断要不要重启链路）
+    fun isRunning(): Boolean = running
+
     /**
      * 取音频输入流（供上层用现有逻辑解析 AURL 流）
      *

@@ -237,8 +237,14 @@ class AudioRelayService : Service() {
      * :return: 无返回值
      */
     private fun stopAudioSession() {
-        DiagLog.i("服务", "收到停止指令：仅结束音频会话，服务与通知保持常驻")
-        // 先断开当前会话的客户端 socket：让接收循环走到退出分支，
+        DiagLog.i("服务", "收到停止指令：结束音频会话并停止接收，服务与通知保持常驻")
+        // 先停接收（关监听 + 停中转出站），再断当前会话。顺序很重要：
+        // 只断会话不关监听的话，电脑端的自动重连会在几十毫秒内重新连上，
+        // 表现为「点了停止，按钮变开始，但声音一直在响」（实测日志 09:05:40 两次复现）。
+        // isServerRunning 一并置 false：所有读流循环都拿它当退出条件。
+        stopLanServer()
+        stopRelayLink()
+        // 再断开当前会话的客户端 socket：让接收循环走到退出分支，
         // 顺便由 handleStream 的 finally 完成音轨 pause+flush。
         // 不先断的话，接收线程会一直阻塞在往已暂停音轨里 write，会话结束不了。
         try {
@@ -394,11 +400,23 @@ class AudioRelayService : Service() {
     private fun startLanServer() {
         saveLinkMode("lan")
         broadcastLinkMode("lan")
-        if (serverThread == null || !serverThread!!.isAlive) {
-            isServerRunning = true
-            serverThread = Thread({ startAudioServer() }, "AurelayLanServer").also { it.start() }
-            DiagLog.i("服务", "已选择局域网直连：监听 $AUDIO_PORT 端口")
+        // 已在正常监听（如保活把服务又拉起一次）：直接跳过，避免重复绑定端口
+        val existing = serverSocket
+        if (isServerRunning && existing != null && !existing.isClosed &&
+            serverThread != null && serverThread!!.isAlive
+        ) {
+            return
         }
+        isServerRunning = true
+        // 「停止」后再点「开始」：旧监听线程可能还没退干净，先等它收尾，
+        // 否则新线程绑定 5000 端口会 BindException
+        serverThread?.let { old ->
+            if (old.isAlive) {
+                try { old.join(500) } catch (_: InterruptedException) { }
+            }
+        }
+        serverThread = Thread({ startAudioServer() }, "AurelayLanServer").also { it.start() }
+        DiagLog.i("服务", "已选择局域网直连：监听 $AUDIO_PORT 端口")
     }
 
     /**
@@ -413,7 +431,14 @@ class AudioRelayService : Service() {
         }
         saveLinkMode("relay")
         broadcastLinkMode("relay")
-        if (relayThread != null && relayThread!!.isAlive) return
+        // 中转流还活着（线程在跑、客户端在运行态）：跳过，避免重复出站
+        if (relayThread != null && relayThread!!.isAlive && relayClient.isRunning()) return
+        // 「停止」后再点「开始」：旧线程可能还阻塞在中转管道的读上，先等它退场
+        relayThread?.let { old ->
+            if (old.isAlive) {
+                try { old.join(500) } catch (_: InterruptedException) { }
+            }
+        }
         relayThread = Thread({
             try {
                 relayClient.start(this@AudioRelayService, RelayProtocol.ROLE_RECEIVER, AUDIO_PORT)
@@ -595,11 +620,14 @@ class AudioRelayService : Service() {
             }
             DiagLog.i("监听", "已在 $AUDIO_PORT 端口开始监听（TLS=$useTls），等待电脑端连接")
 
-            while (isServerRunning) {
+            // The listening socket may be closed in advance by "Stop" (stopAudioSession), use a local reference and check for closure each loop,
+            // to avoid the old thread, holding an already-closed socket, spinning idle and spamming logs
+            val socket = serverSocket
+            while (isServerRunning && socket != null && !socket.isClosed) {
                 try {
                     // Accept may throw SSLException if a non-TLS client connects to an SSLServerSocket
                     val maybeClient = try {
-                        serverSocket?.accept()
+                        socket.accept()
                     } catch (sslEx: javax.net.ssl.SSLException) {
                         Log.e("AudioRelay", "SSL exception during accept (possible TLS/plain mismatch): ${sslEx.message}", sslEx)
                         DiagLog.e("监听", "接受连接时发生 TLS 异常（可能是 TLS/明文不匹配）", sslEx)
@@ -610,7 +638,8 @@ class AudioRelayService : Service() {
                         handleClient(client)
                     }
                 } catch (e: IOException) {
-                    if (isServerRunning) {
+                    // Closed by "Stop" is an expected exit, no error logged; only genuine accept exceptions are reported
+                    if (isServerRunning && !socket.isClosed) {
                         Log.e("AudioRelay", "Error accepting client or reading data: ", e)
                         DiagLog.e("监听", "接受连接或读取数据出错", e)
                     }
