@@ -78,6 +78,12 @@ class AudioRelayService : Service() {
     // 最短间隔限频，避免与「残留帧」短暂错过叠加成高频重连。
     @Volatile private var relayHeaderMissCount: Int = 0
     @Volatile private var relayLastForceReconnectAt: Long = 0L
+    // 中转链路扫描魔数时是否读到了 EOF（对端已断开、管道已关闭）。
+    // EOF 与「扫满 64KB 仍无包头」是两种完全不同的场景：EOF 说明 PC 端已断开，
+    // 中转客户端会由 onClosed/onFailure 自动重连并重建管道，此时若再 forceReconnect
+    // 只会「自己关自己」、加剧震荡（实测 20:48 起每 20 秒一轮）。只有「数据还在
+    // 源源不断、但扫满 64KB 找不到魔数」才是「包头被错过」的信号，才需要重连。
+    @Volatile private var relayHeaderEof: Boolean = false
 
     // 当前一路客户端会话的 socket（用于「停止会话」时主动关闭，见 stopAudioSession）
     @Volatile private var currentClientSocket: Socket? = null
@@ -879,6 +885,7 @@ class AudioRelayService : Service() {
             val input = PushbackInputStream(rawInput, HEADER_SIZE)
             // 每次会话开始前清掉上一轮的判定结果
             headerIncomplete = false
+            relayHeaderEof = false
             // 中转链路的数据来自服务器转发，不能按官方裸 PCM 处理：
             // PC 端与手机的协议只有AURL 一种，无包头即说明这是旧会话的残留帧。
             val isRelayPeer = peerLabel == "中转服务器"
@@ -1029,6 +1036,14 @@ class AudioRelayService : Service() {
     private fun onRelayHeaderMissed() {
         // 只在「真正的中转链路」下处理；链路自检可能已切走，重连前再确认一次
         if (!relayClient.isRunning()) return
+        // 读到 EOF（对端已断开、管道已关闭）时**不要** forceReconnect：
+        // 中转客户端会由 onClosed/onFailure 自动重连并重建管道，此时再主动
+        // 关连接只会「自己关自己」、与服务端清 S 叠加成每 20 秒一轮的震荡。
+        // 静默返回，让消费循环 sleep 等待自动重连重建新管道即可。
+        if (relayHeaderEof) {
+            DiagLog.w("协议", "中转管道已读到 EOF（对端断开），静默等待自动重连重建管道")
+            return
+        }
         val now = System.currentTimeMillis()
         // 时间间隔限频：扫满 64KB 仍未找到魔数已是「包头确实丢失」的强信号，
         // 应尽快重连让 PC 重发包头；但若重连后立刻又失败，说明是更底层的震荡，
@@ -1196,6 +1211,7 @@ class AudioRelayService : Service() {
             }
             if (b < 0) {
                 headerIncomplete = true
+                relayHeaderEof = true
                 return null
             }
             idleMillis = 0
@@ -1296,7 +1312,7 @@ class AudioRelayService : Service() {
 
     // 自研分帧 PCM 流：每帧 = 4 字节大端长度 + PCM 数据
     private fun streamFramedPcm(
-        input: InputStream,
+        input: PushbackInputStream,
         track: AudioTrack,
         outChannels: Int,
         session: DiagSession
@@ -1317,7 +1333,7 @@ class AudioRelayService : Service() {
 
     // 自研分帧 Opus 流：每帧为 1 个 Opus 包，解码后写 AudioTrack
     private fun streamFramedOpus(
-        input: InputStream,
+        input: PushbackInputStream,
         track: AudioTrack,
         decoder: OpusDecoder?,
         outChannels: Int,
@@ -1347,20 +1363,36 @@ class AudioRelayService : Service() {
     }
 
     // 读取一个音频帧：4 字节大端长度 + 数据；流结束返回 null
-    private fun readFrame(input: InputStream): ByteArray? {
-        val lenBuf = ByteArray(4)
-        if (!readFully(input, lenBuf, 4)) return null
-        val length = ((lenBuf[0].toInt() and 0xFF) shl 24) or
-                ((lenBuf[1].toInt() and 0xFF) shl 16) or
-                ((lenBuf[2].toInt() and 0xFF) shl 8) or
-                (lenBuf[3].toInt() and 0xFF)
-        if (length <= 0 || length > 1024 * 1024) {
-            Log.w("AudioRelay", "非法帧长度 $length，结束本次流")
-            return null
+    private fun readFrame(input: PushbackInputStream): ByteArray? {
+        while (true) {
+            val lenBuf = ByteArray(4)
+            if (!readFully(input, lenBuf, 4)) return null
+            val length = ((lenBuf[0].toInt() and 0xFF) shl 24) or
+                    ((lenBuf[1].toInt() and 0xFF) shl 16) or
+                    ((lenBuf[2].toInt() and 0xFF) shl 8) or
+                    (lenBuf[3].toInt() and 0xFF)
+            // 若这 4 字节恰好是 AURL 魔数（41 55 52 4c），说明 PC 端在推流中途
+            // 重连并重发了新包头，被本会话误当成「帧长度」读走了。新包头后紧跟的
+            // 仍是同样格式的 Opus 帧流，这里只需读完后 4 字节包头参数并跳过，
+            // 继续读下一个真正的帧即可，无需中断会话、更不用重连（实测 20:48 起
+            // 每 20 秒一轮「静音自动重启」的根因：旧实现把新包头当非法长度、结束
+            // 会话后上层又扫不到被截断的包头，触发 forceReconnect 震荡）。
+            val isAurlMagic = lenBuf[0] == 'A'.code.toByte() && lenBuf[1] == 'U'.code.toByte() &&
+                    lenBuf[2] == 'R'.code.toByte() && lenBuf[3] == 'L'.code.toByte()
+            if (isAurlMagic) {
+                DiagLog.w("协议", "帧流中检测到新 AURL 包头（PC 重连重发），跳过包头继续解析后续帧")
+                val rest = ByteArray(4)
+                if (!readFully(input, rest, 4)) return null
+                continue
+            }
+            if (length <= 0 || length > 1024 * 1024) {
+                Log.w("AudioRelay", "非法帧长度 $length，结束本次流")
+                return null
+            }
+            val payload = ByteArray(length)
+            if (!readFully(input, payload, length)) return null
+            return payload
         }
-        val payload = ByteArray(length)
-        if (!readFully(input, payload, length)) return null
-        return payload
     }
 
     // 尽力读满指定字节数；读超时则继续重试，流结束或长时间无数据返回 false
