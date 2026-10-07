@@ -52,6 +52,15 @@ class AudioRelayService : Service() {
     // 中转客户端（蜂窝链路）与其接收线程
     private val relayClient = RelayClient()
     private var relayThread: Thread? = null
+
+    // 周期链路自检线程：网络回调（NetworkWatcher）在个别机型上可能漏报
+    // 「WiFi→蜂窝」切换（实测 19:18 OnePlus LE2120 切蜂窝后类型始终停在 WIFI），
+    // 导致中转 R 从不启动。此线程每 10 秒主动 detect 一次真实网络类型，
+    // 与当前已保存的链路模式比对，不一致就纠正，作为兜底安全网。
+    private var linkSelfCheckThread: Thread? = null
+
+    // 自检线程的运行标志（独立于 isServerRunning，避免「停止会话」误杀自检线程）
+    @Volatile private var linkSelfCheckRunning = false
     private var useTls: Boolean = false // Default to plain TCP for easier testing (change to true for production TLS)
     private var audioTrack: AudioTrack? = null
 
@@ -199,6 +208,50 @@ class AudioRelayService : Service() {
             } else {
                 stopLanServer()
                 startRelayLink()
+            }
+        }
+        // 周期自检兜底：网络回调可能漏报切换（见 linkSelfCheckThread 字段注释），
+        // 这里每 10 秒主动探测一次真实网络类型，与当前链路比对纠正。
+        if (linkSelfCheckThread == null || linkSelfCheckThread!!.isAlive.not()) {
+            linkSelfCheckRunning = true
+            linkSelfCheckThread = Thread({ linkSelfCheckLoop() }, "AurelayLinkSelfCheck").also {
+                it.isDaemon = true
+                it.start()
+            }
+        }
+    }
+
+    // 周期链路自检循环：发现「实际网络类型」与「当前链路」不符就纠正
+    private fun linkSelfCheckLoop() {
+        while (linkSelfCheckRunning) {
+            try {
+                Thread.sleep(10_000L)
+            } catch (e: InterruptedException) {
+                break
+            }
+            if (!linkSelfCheckRunning) break
+            try {
+                val actual = NetworkWatcher.detect(this)
+                val currentMode = AppPrefs.getString(this, AppPrefs.KEY_LAST_LINK_MODE, "lan")
+                val expectLan = actual == NetworkWatcher.NetType.WIFI
+                val currentlyLan = currentMode == "lan"
+                if (expectLan != currentlyLan) {
+                    DiagLog.w(
+                        "服务",
+                        "链路自检发现偏差：实际网络=$actual 当前链路=${if (currentlyLan) "局域网直连" else "服务器中转"}，" +
+                            "自动纠正为${if (expectLan) "局域网直连" else "服务器中转"}"
+                    )
+                    clearPeerInfo("链路自检纠正")
+                    if (expectLan) {
+                        stopRelayLink()
+                        startLanServer()
+                    } else {
+                        stopLanServer()
+                        startRelayLink()
+                    }
+                }
+            } catch (e: Exception) {
+                DiagLog.w("服务", "链路自检失败：${e.message}")
             }
         }
     }
@@ -1651,6 +1704,10 @@ class AudioRelayService : Service() {
         currentOutChannels = 0
         // 停止中转链路
         stopRelayLink()
+        // 停止周期链路自检线程
+        linkSelfCheckRunning = false
+        linkSelfCheckThread?.interrupt()
+        linkSelfCheckThread = null
         // Ensure UI knows we're disconnected when service stops
         try {
             val bcast = Intent("com.devindeed.aurelay.CLIENT_CONNECTION")
