@@ -1002,6 +1002,12 @@ class AudioRelayService : Service() {
             // 标记「包头未收全」：让上层放弃本次会话，而不是把残留的 Opus 裸帧
             // 当成 44.1kHz 裸 PCM 播放（那是「停止再开始后严重失真」的元凶之一）。
             headerIncomplete = true
+            // ⚠️ 主动强制重连：光「放弃本次会话」不够——上层 relayThread 的
+            // while(isRunning) 会立刻再次消费**同一条还没读到底的管道**，又读到
+            // 下一段残留帧 → 再放弃 → 无限循环（实测 15:11:50~58 每秒 60+ 次，
+            // 状态文字「连接成功/失败」高频闪屏）。强制重连会关闭当前 WebSocket、
+            // 丢弃旧管道，重连成功后重建干净管道，新数据才是正经 AURL 包头。
+            relayClient.forceReconnect()
             return null
         }
 
