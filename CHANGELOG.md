@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.34] - 2026-10-07
+
+### Fixed
+- **失真（v1.5.33 的修复没打中：这次拿到的是包头被「截断」而非「缺失」）**
+  手机日志 10:59:46 读到的是 `01 01 02 01 00 00 00 c4` —— 完整的 AURL 包头是
+  `41 55 52 4c | 01 01 02 01`，也就是说**前 4 字节魔数被吞掉了**，
+  不是整个包头没送到（此前 v1.5.32/33 的判断都是错的）。
+  - **PC 端**：`ws.send_binary()` 的返回值是**实际写入字节数**，连接拥塞或帧过大时
+    会小于 `len(data)`，甚至返回 0。旧代码忽略返回值、无条件当成功，
+    于是 8 字节包头被部分发送/丢弃。现在校验 `sent == len(data)`，否则判失败并重连。
+  - **App 端**：`PipedOutputStream.write()` 是**可能部分写入**的（256KB 缓冲区满时
+    只写进一部分就返回）。现在循环写满为止，避免音频帧被截断。
+- **关掉「自动启动」后仍自动启动服务**：`KeepAliveReceiver`（AlarmManager 兜底）与
+  `KeepAliveJobService`（JobScheduler 兜底）都只检查「全程保活」开关，
+  **完全绕过了「自动启动」开关**，于是每15 分钟照旧把服务拉起来。
+  两条兜底现在都同时检查 `KEY_AUTO_START`。
+  语义（用户确认）：自动启动 = 允许服务自启；关掉后 App 运行期间的通知与保活不受影响，
+  只是进程真被杀后不再自动复活。
+- **通知栏常驻出现「"Aurelay声音中继"正在其他应用的上层运行 / 显示内容…」系统提示**：
+  来自「一像素锚点」——它用 `TYPE_APPLICATION_OVERLAY` 悬浮窗实现保活，属于
+  「在其他应用上层显示」，系统因此弹出该提示并引导用户去设置里关闭。
+  该提示是系统文案，改不了，只能去掉悬浮窗。一像素锚点**默认改为关闭**
+  （`KEY_KEEP_ALIVE_ONE_PIXEL` 默认值 `true` → `false`，设置页同步），
+  需要时可在设置里手动开启。其余保活锚点不触发这类提示。
+
 ## [v1.5.33] - 2026-10-07
 
 ### Fixed

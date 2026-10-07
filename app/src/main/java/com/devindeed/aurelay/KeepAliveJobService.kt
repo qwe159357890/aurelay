@@ -23,6 +23,13 @@ class KeepAliveJobService : JobService() {
     override fun onStartJob(params: JobParameters?): Boolean {
         DiagLog.install(this)
         DiagLog.i("保活", "JobScheduler 兜底任务触发")
+        // 与 KeepAliveReceiver 同理：必须一并检查「自动启动」开关，
+        // 否则用户在设置里关掉它，这条兜底仍会把服务拉起来。
+        // 语义（用户 2026-10-07 确认）：自动启动 = 允许服务自启。
+        if (!AppPrefs.getBoolean(this, AppPrefs.KEY_AUTO_START, false)) {
+            DiagLog.i("保活", "自动启动开关已关闭，不拉起服务")
+            return false
+        }
         if (AppPrefs.getBoolean(this, AppPrefs.KEY_KEEP_ALIVE_ALWAYS, true)) {
             try {
                 val service = Intent(this, AudioRelayService::class.java)

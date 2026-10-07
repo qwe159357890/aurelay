@@ -184,8 +184,13 @@ class AudioRelayService : Service() {
         } else {
             ResourceHolder.releaseAll(this)
         }
-        // 一像素锚点（独立开关）
-        if (AppPrefs.getBoolean(this, AppPrefs.KEY_KEEP_ALIVE_ONE_PIXEL, true)) {
+        // 一像素锚点（独立开关，默认关闭）。
+        //⚠️ 默认开启会让系统每次都弹出「"Aurelay声音中继"正在其他应用的上层运行 /
+        //   显示内容…」这类提示，并引导用户去设置里关掉该功能 —— 用户实测非常困扰。
+        //   原因是一像素锚点用 TYPE_APPLICATION_OVERLAY 悬浮窗实现，属于「在其他应用上层显示」。
+        //   悬浮窗是可选保活手段，其余锚点（WakeLock / AlarmManager / JobScheduler 等）
+        //   不触发这类系统提示，故默认关闭，需要时在设置里手动开启。
+        if (AppPrefs.getBoolean(this, AppPrefs.KEY_KEEP_ALIVE_ONE_PIXEL, false)) {
             OnePixelOverlay.show(this)
         } else {
             OnePixelOverlay.hide(this)

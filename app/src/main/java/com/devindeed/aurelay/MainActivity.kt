@@ -1549,7 +1549,9 @@ fun AurelayApp(
         var tempAutoStart by remember { mutableStateOf(prefs.getBoolean(AppPrefs.KEY_AUTO_START, false)) }
         // 保活三开关（全程保活 + 一像素锚点 + 无声播放，后两项各自独立）
         var tempKeepAliveAlways by remember { mutableStateOf(prefs.getBoolean(AppPrefs.KEY_KEEP_ALIVE_ALWAYS, true)) }
-        var tempOnePixel by remember { mutableStateOf(prefs.getBoolean(AppPrefs.KEY_KEEP_ALIVE_ONE_PIXEL, true)) }
+        // 与服务侧 applyKeepAlive() 的默认值保持一致：默认关闭，
+        // 避免一像素悬浮窗触发系统「正在其他应用的上层运行 / 显示内容…」提示
+        var tempOnePixel by remember { mutableStateOf(prefs.getBoolean(AppPrefs.KEY_KEEP_ALIVE_ONE_PIXEL, false)) }
         var tempSilentPlay by remember { mutableStateOf(prefs.getBoolean(AppPrefs.KEY_KEEP_ALIVE_SILENT_PLAY, true)) }
         // 中转配置
         var tempRelayServer by remember { mutableStateOf(prefs.getString(AppPrefs.KEY_RELAY_SERVER, AppPrefs.DEFAULT_RELAY_SERVER) ?: AppPrefs.DEFAULT_RELAY_SERVER) }
