@@ -927,7 +927,7 @@ class AudioRelayService : Service() {
                     startForeground(
                         NOTIFICATION_ID,
                         buildNotification(),
-                        android.content.pm.ServiceInfo.FLAG_ONGOING_EVENT
+                        android.app.Notification.FLAG_ONGOING_EVENT
                     )
                 }
             } catch (e: Exception) {
