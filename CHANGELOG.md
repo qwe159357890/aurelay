@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.43] - 2026-10-07
+
+### Fixed
+- **中转链路「扫描魔数失败 → 死循环重扫」的根治（本次 20:12~20:15 事故）**：PC 端每次
+  连接只发一次 AURL 包头，手机若因残留帧/时序错过包头，后续纯 Opus 帧里再也不出现
+  魔数，`scanRelayMagic` 扫满 64KB 后放弃；但 `startRelayLink` 的消费循环拿到的仍是
+  同一根管道（WebSocket 未断），于是陷入「重扫→失败→再重扫」死循环（实测每 5.6 秒
+  一轮，会话代次不断 +1，手机全程无声音）。修复：`handleStream` 检测到中转链路
+  包头缺失（`headerIncomplete`）时，调用新增的 `onRelayHeaderMissed()` 触发一次受控
+  的 `relayClient.forceReconnect()`，让 PC 端重新发包头；用 5 秒最短间隔限频，避免与
+  「残留帧」短暂错过叠加成高频重连（历史教训 18:45 三方共振死循环）。成功定位包头时
+  清零计数，防止残留计数导致误重连。
+
 ## [v1.5.42] - 2026-10-07
 
 ### Fixed
