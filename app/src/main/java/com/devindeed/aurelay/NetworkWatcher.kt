@@ -113,11 +113,26 @@ object NetworkWatcher {
      *
      * 先重新探测网络类型并缓存，再通知全部订阅者，保证订阅者拿到的是最新值。
      *
+     * ⚠️ 去重：Android 切网络时 NetworkCallback 通常会**连续触发多次**
+     * （onLost / onAvailable / onCapabilitiesChanged 各一次，有时还夹带
+     * onLinkPropertiesChanged）。若不区分「网络类型是否真的变了」，会导致
+     * 订阅者（服务层）在同一网络类型下反复「重新选择链路」——实测 18:44:14
+     * 切蜂窝后 18:44:28 又触发一次 CELLULAR，服务层重走 startRelayLink，
+     * 中转链路被打断、重连，进而诱发「残留帧 → forceReconnect」死循环。
+     * 这里只在类型真正变化时通知，其余变化（如 IP 变更、能力微调）忽略。
+     *
      * :param context: 任意上下文（用于重新探测网络类型）
      * :return: 无返回值
      */
     fun onSystemNetworkChanged(context: Context) {
-        val type = refresh(context)
+        val type = detect(context)
+        val previous = current
+        current = type
+        DiagLog.i("网络", "当前网络类型：$type")
+        if (type == previous) {
+            // 网络类型没变，只是系统回调抖动（能力/IP 变化），不去重会反复触发链路切换
+            return
+        }
         val snapshot: List<(NetType) -> Unit> = synchronized(lock) { ArrayList(listeners) }
         DiagLog.i("网络", "网络已切换到 $type，通知 ${snapshot.size} 个订阅者")
         for (listener in snapshot) {
