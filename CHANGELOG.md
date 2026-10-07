@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.36] - 2026-10-07
+
+### Fixed
+- **蜂窝中转「手动开始后完全没声音」根治**：手机日志 `12:56 切蜂窝 → 已选择服务器中转 →
+  0.0 秒就「接收结束」` 暴露了直接根因——切蜂窝时 `NetworkWatcher` 先 `stopLanServer()`
+  把 `isServerRunning` 置 false，而 `startRelayLink()` 没把它置回 true，导致中转链路的
+  `handleStream` 一进来就因 `while(isServerRunning)` / `if(!isServerRunning)` 立即退出，
+  一个字节都收不到。现在 `startRelayLink()` 复位 `isServerRunning = true`。
+- **中转断线重连后无人消费**：中转客户端断线会自动重连，但接收线程只消费一次
+  `handleStream` 就退出，重连成功后新数据无人读管道 → 无声。现在接收线程改为循环消费，
+  中转客户端每次重连成功（onOpen）都重建管道，保证新流总有人读。
+- **「假连接」被误判为裸 PCM**：`readHeader` 读到 EOF / 服务停止 / 中转残留帧时，
+  此前都返回 null 却没标记 `headerIncomplete`，导致上层把它们当成 44.1kHz 裸 PCM，
+  建立音轨又立即结束（「电脑端已连接 → 0 秒结束 → 无声音」）。现在这三类情况统一
+  标记 `headerIncomplete = true`，上层正确放弃会话而非硬播。
+
 ## [v1.5.35] - 2026-10-07
 
 ### Fixed
