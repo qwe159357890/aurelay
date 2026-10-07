@@ -1,6 +1,7 @@
 package com.devindeed.aurelay
 
 import android.content.Context
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -11,6 +12,8 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
+import java.net.InetAddress
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -32,6 +35,25 @@ import java.util.concurrent.TimeUnit
  *
  * 心跳 30 秒一次文本 ping；断线按 1/2/4/8/16/30 秒退避重连。
  */
+
+/**
+ * 中转连接专用的 DNS 解析器：系统解析失败时兜底到服务器公网 IP。
+ *
+ * 实测蜂窝网络下切网后第一次连接 `039039.xyz` 偶发
+ * `Unable to resolve host`，重连又成功，说明是运营商 DNS 抖动而非域名失效。
+ * 兜底 IP（AppPrefs.RELAY_FALLBACK_IP）保证蜂窝链路稳定建立。
+ */
+private val relayDns = object : Dns {
+    override fun lookup(hostname: String): List<InetAddress> {
+        return try {
+            Dns.SYSTEM.lookup(hostname)
+        } catch (e: UnknownHostException) {
+            DiagLog.w("中转", "DNS 解析失败：$hostname，改用兜底 IP ${AppPrefs.RELAY_FALLBACK_IP}")
+            listOf(InetAddress.getByName(AppPrefs.RELAY_FALLBACK_IP))
+        }
+    }
+}
+
 class RelayClient {
 
     /**
@@ -132,6 +154,7 @@ class RelayClient {
         rebuildPipe()
 
         httpClient = OkHttpClient.Builder()
+            .dns(relayDns)
             .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .build()
@@ -159,6 +182,27 @@ class RelayClient {
 
     // 中转客户端是否处于运行态（供服务层判断要不要重启链路）
     fun isRunning(): Boolean = running
+
+    /**
+     * 强制重连：主动断开当前 WebSocket 并触发一次全新连接
+     *
+     * 用于「读到旧会话残留帧」这类需要立刻丢弃当前管道、重建干净链路的场景。
+     * 断开后 onClosed 会 closePipe（让上层立即 EOF 退出本次消费）并 scheduleReconnect，
+     * 重连成功（onOpen）后 rebuildPipe 重建全新管道，残留数据随旧管道一起被丢弃，
+     * 上层重新消费时读到的就是新连接发来的 AURL 包头。
+     *
+     * :return: 无返回值
+     */
+    @Synchronized
+    fun forceReconnect() {
+        if (!running) return
+        DiagLog.w("中转", "强制重连：丢弃当前管道与旧会话残留")
+        closeWebSocket()
+        closePipe()
+        // 直接触发重连（closeWebSocket 的 onClosed 回调也会 scheduleReconnect，
+        // 但 cancel() 有时不回调 onClosed，这里显式补一次，双保险）
+        scheduleReconnect()
+    }
 
     /**
      * 取音频输入流（供上层用现有逻辑解析 AURL 流）
