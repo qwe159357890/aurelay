@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog (https://keepachangelog.com/en/1.0.0/)
 and this project adheres to Semantic Versioning (https://semver.org/).
 
+## [v1.5.35] - 2026-10-07
+
+### Fixed
+- **失真根治（服务端中转残留帧竞态）**：手机日志铁证 `01 01 02 01 00 00 00 c4`
+  是「包头前 4 字节魔数被吞」。真正根因在服务端：R 重接入 / 同角色顶替时
+  `close()` 是异步的，被顶掉的旧连接协程仍可能在 `receive()` 上拿到关闭前已送达的
+  音频帧并转发给新对端。服务端转发前现在校验「发送方仍是房间当前连接」，
+  残留帧直接丢弃。（App 端 v1.5.33 的 `isRelayPeer` 兜底已能挡住裸 PCM 误判，
+  但会频繁重连；服务端修复后彻底不再产生残留帧。⚠️ 需重新部署 center-server 生效。）
+
+### Changed
+- **常驻通知与保活拆分为独立 `KeepAliveService`（无条件启动）**：
+  通知 + 保活资源 + 地址上报归 KeepAliveService，接收音频归 AudioRelayService。
+  打开 App 与开机自启都无条件拉起保活服务（常驻通知永远存在），
+  不再依赖接收服务。
+- **「自动启动服务」开关语义恢复**：只管「是否自动启动接收服务」——
+  开 = 打开 App / 开机后自动开始接收；关 = 必须手动点「开始」。
+  与常驻通知彻底解耦（两层独立）。开机自启本身（保活+通知）硬编码无条件。
+- **设置弹窗修复**：「全程保活 / 一像素锚点 / 无声播放」三个开关此前被错放在
+  弹窗之外（孤儿 Composable），导致弹窗里看不到。已移回弹窗正文。
+
 ## [v1.5.34] - 2026-10-07
 
 ### Fixed
