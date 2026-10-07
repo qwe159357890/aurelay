@@ -140,7 +140,20 @@ object AddressReporter {
         //                   此时**仍然要上报**（只是不带地址），让电脑端知道
         //                   「这台设备现在只能走服务器中转」并自动切换。
         // 旧行为是蜂窝直接跳过上报，导致电脑端根本查不到这台设备。
-        val isWifi = NetworkWatcher.detect(context) == NetworkWatcher.NetType.WIFI
+        //
+        // 【一致性关键】这里必须用 NetworkWatcher.lastKnown()（链路切换同一回调里
+        // refresh() 缓存的类型），而不是再 detect() 一次。detect() 是独立实时探测，
+        // 会受系统网络回调延迟/抖动影响，与 AudioRelayService 的链路选择产生矛盾：
+        // 实测 16:07:20 服务已检测到 CELLULAR 切中转，但 16:07:21 上报时 detect()
+        // 又返回 WIFI，于是上报成「直连模式 IPv4=2 IPv6=5」，PC 端据此拿到错误的
+        // mode，反复连错链路。用缓存值可保证「上报的 mode == 实际选的链路」。
+        val lastType = NetworkWatcher.lastKnown()
+        val isWifi = if (lastType == NetworkWatcher.NetType.NONE) {
+            // 缓存尚未初始化（如进程刚起、还没触发过网络回调），退化为实时探测一次
+            NetworkWatcher.detect(context) == NetworkWatcher.NetType.WIFI
+        } else {
+            lastType == NetworkWatcher.NetType.WIFI
+        }
         val mode = if (isWifi) MODE_DIRECT else MODE_RELAY
 
         // 采集本机 IPv4 / IPv6 地址（蜂窝下不采集，避免把无效地址塞进候选列表）
